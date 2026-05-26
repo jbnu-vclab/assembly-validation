@@ -1,10 +1,11 @@
 # pip dependencies — conda env `dc` activate 후 설치
 #
 # conda (activate dc):
-#   conda install -c conda-forge numpy trimesh open3d pythonocc-core nodejs
-#   conda install -c lambouj -c conda-forge occwl
+#   conda install -c conda-forge numpy trimesh pythonocc-core nodejs -y
 #
 # pip (저장소 루트):
 #   pip install -r requirements.txt
+open3d>=0.19.0
+occwl @ git+https://github.com/AutodeskAILab/occwl.git
 msgpack>=1.0.0
 tqdm>=4.0.0

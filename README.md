@@ -57,8 +57,7 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 conda create -n dc python=3.10 -y
 conda activate dc
 
-conda install -c conda-forge numpy trimesh open3d pythonocc-core nodejs -y
-conda install -c lambouj -c conda-forge occwl -y
+conda install -c conda-forge numpy trimesh pythonocc-core nodejs -y
 pip install -r requirements.txt
 ```
 
@@ -77,8 +76,8 @@ node -v && npm -v
 npm install    # frontend/ 의존성도 postinstall 로 설치
 ```
 
-- **`occwl`은 pip가 아니라 conda** (`lambouj` 채널)로 설치합니다.
-- **`requirements.txt`는 msgpack·tqdm만** (pip).
+- **`open3d`·`occwl`은 pip** (`requirements.txt`). `occwl`은 PyPI에 없어 GitHub에서 설치합니다.
+- **`requirements.txt`**: open3d, occwl(GitHub), msgpack, tqdm.
 - **`nodejs`는 conda-forge**로 `dc`에 설치합니다. `npm`/`node`는 **`conda activate dc` 후** 사용합니다.
 - 환경 이름을 `dc`가 아니게 쓰면 `frontend/server.js`와 `scripts/check-dc-env.sh`의 `dc`를 같이 바꾸세요.
 
@@ -191,7 +190,7 @@ Three.js: CDN `three@0.170.0`
 
 **conda / `dc` 없음** — 위 [설치](#1-conda-환경-dc) 절차.
 
-**`occwl` pip 설치 실패** — PyPI에 없습니다. `conda install -c lambouj -c conda-forge occwl` 사용.
+**`occwl` conda 설치 실패** — `open3d`·`occwl`을 conda가 아니라 `pip install -r requirements.txt`로 설치하세요. `occwl`은 PyPI에 없고 GitHub URL로 설치됩니다.
 
 **`npm: command not found`** — `conda activate dc` 후 실행하세요. README 1단계에서 `nodejs` conda 설치가 필요합니다.
 
