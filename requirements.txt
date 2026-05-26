@@ -1,7 +1,7 @@
 # pip dependencies — conda env `dc` activate 후 설치
 #
 # conda (activate dc):
-#   conda install -c conda-forge numpy trimesh open3d pythonocc-core
+#   conda install -c conda-forge numpy trimesh open3d pythonocc-core nodejs
 #   conda install -c lambouj -c conda-forge occwl
 #
 # pip (저장소 루트):

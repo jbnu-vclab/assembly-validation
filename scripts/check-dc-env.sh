@@ -8,13 +8,18 @@ if ! command -v conda >/dev/null 2>&1; then
 	exit 1
 fi
 
+if ! conda run -n dc node -v >/dev/null 2>&1; then
+	echo "[backend] ERROR: conda env 'dc'에 nodejs/npm 없음. README: conda install -c conda-forge nodejs"
+	exit 1
+fi
+
 if conda run -n dc python -c \
 	"import numpy, trimesh, open3d; from occwl.compound import Compound; import msgpack, tqdm" \
 	2>/dev/null
 then
-	echo "[backend] conda env 'dc' OK — pipeline ready"
+	echo "[backend] conda env 'dc' OK — Python pipeline + node/npm ready"
 	exit 0
 fi
 
-echo "[backend] ERROR: conda env 'dc' 미설정 또는 패키지 누락. README 설치 절차를 참고하세요."
+echo "[backend] ERROR: conda env 'dc' 미설정 또는 Python 패키지 누락. README 설치 절차를 참고하세요."
 exit 1

@@ -41,7 +41,7 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 
 | 구분 | 버전·도구 |
 |------|-----------|
-| Node.js | 18+ |
+| Node.js | **`dc` 환경에 conda로 설치** (`nodejs`, 18+) |
 | Conda | Miniconda 또는 Anaconda |
 | Python | conda 환경 **`dc`** (이름 고정, `server.js` 참조) |
 
@@ -49,47 +49,45 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 
 저장소 clone 후 **저장소 루트**에서:
 
-### 1. Conda 환경 `dc`
+### 1. Conda 환경 `dc` (Python + Node)
 
-환경을 만든 뒤 **activate한 상태에서** 패키지를 설치합니다.
+환경을 만든 뒤 **activate한 상태에서** Python·Node 의존성을 모두 설치합니다.
 
 ```bash
 conda create -n dc python=3.10 -y
 conda activate dc
 
-conda install -c conda-forge numpy trimesh open3d pythonocc-core -y
+conda install -c conda-forge numpy trimesh open3d pythonocc-core nodejs -y
 conda install -c lambouj -c conda-forge occwl -y
 pip install -r requirements.txt
 ```
 
-확인 (여전히 `dc`가 activate된 터미널에서):
+확인 (`dc` activate 상태):
 
 ```bash
 python -c "import numpy, trimesh, open3d; from occwl.compound import Compound; import msgpack, tqdm; print('dc ok')"
+node -v && npm -v
 ```
 
-설치가 끝나면 Node 쪽 작업을 위해 deactivate 해도 됩니다.
+### 2. Node 패키지 (프로젝트)
 
-```bash
-conda deactivate
-```
-
-- **`occwl`은 pip가 아니라 conda** (`lambouj` 채널)로 설치합니다.
-- **`requirements.txt`는 msgpack·tqdm만** 포함합니다.
-- 환경 이름을 `dc`가 아니게 쓰면 `frontend/server.js`와 `scripts/check-dc-env.sh`의 `dc`를 같이 바꾸세요.
-- **`npm start`는 `(base)` 터미널에서 실행**하면 됩니다. 서버가 STEP 변환 시 `conda run -n dc`로 Python을 호출합니다 (activate 유지 불필요).
-
-### 2. Node
+**`dc` activate 상태**에서 저장소 루트:
 
 ```bash
 npm install    # frontend/ 의존성도 postinstall 로 설치
 ```
 
-`frontend/node_modules`만 이미 있으면 `npm install` 없이 `npm start`만 해도 됩니다.
+- **`occwl`은 pip가 아니라 conda** (`lambouj` 채널)로 설치합니다.
+- **`requirements.txt`는 msgpack·tqdm만** (pip).
+- **`nodejs`는 conda-forge**로 `dc`에 설치합니다. `npm`/`node`는 **`conda activate dc` 후** 사용합니다.
+- 환경 이름을 `dc`가 아니게 쓰면 `frontend/server.js`와 `scripts/check-dc-env.sh`의 `dc`를 같이 바꾸세요.
 
 ## 실행
 
+**`dc` activate 상태**에서 저장소 루트:
+
 ```bash
+conda activate dc
 npm start
 ```
 
@@ -194,6 +192,8 @@ Three.js: CDN `three@0.170.0`
 **conda / `dc` 없음** — 위 [설치](#1-conda-환경-dc) 절차.
 
 **`occwl` pip 설치 실패** — PyPI에 없습니다. `conda install -c lambouj -c conda-forge occwl` 사용.
+
+**`npm: command not found`** — `conda activate dc` 후 실행하세요. README 1단계에서 `nodejs` conda 설치가 필요합니다.
 
 **`pythonocc-core` conda 충돌** — `conda activate dc` 후 설치하고, Python 3.10 환경을 유지하세요.
 
