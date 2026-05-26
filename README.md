@@ -51,7 +51,7 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 
 ### 1. Conda 환경 `dc`
 
-환경을 만든 뒤 **activate한 상태에서** 패키지를 설치합니다. (`conda install -n dc ...` 대신 이 흐름을 권장합니다.)
+환경을 만든 뒤 **activate한 상태에서** 패키지를 설치합니다.
 
 ```bash
 conda create -n dc python=3.10 -y
