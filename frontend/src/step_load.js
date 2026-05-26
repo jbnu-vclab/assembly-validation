@@ -1,4 +1,4 @@
-// ——— STEP 파일 선택·업로드·폴링 ———
+// STEP 파일 선택·업로드·상태 폴링
 
 export function pickStepFile() {
 	return new Promise((resolve, reject) => {
@@ -80,7 +80,7 @@ export async function uploadAndBuildFromStep(file, opts = {}) {
 	return waitStepBuild(jobId, opts)
 }
 
-// ——— 변환 상태 문구용 말줄임 애니 ———
+// 변환 상태 UI 말줄임 애니메이션
 
 /**
  * 서버/로컬 메시지 끝의 점·공백·말줄임(…)을 제거해 애니메이션 베이스로 씀.

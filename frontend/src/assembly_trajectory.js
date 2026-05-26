@@ -1,17 +1,10 @@
 /**
- * 백엔드 `assembly_validation_v3.py` (또는 v1/v2) 조립 msgpack — assembly 궤적 스펙과 1:1 대응.
- * v3: `failed_collisions` 교착 부품도 `trajectories[id]` 에 충돌까지 조립 스텝 포함.
+ * `assembly_validation_v3.py` 조립 msgpack 파싱.
  *
- * metadata.voxel_size: 그리드·MOVE step 정합용 (렌더는 `meshes`, 경로·충돌은 `solids` voxel).
- *
- * assembly.trajectories: 키는 매니페스트 parts[] 의 **0-based 인덱스 문자열** `"0".."K-1"` 이거나,
- * 팀 백엔드에서 쓰는 **1-based** (`"1".."K"`, 이때 `"0"` 키 없음), 또는 **parts[].name** 과 동일한 문자열.
- * 값 = 스텝 배열:
- *   - { type: "MOVE", axis: "+X"|"-X"|"+Y"|... , value: number }
- *   - { type: "ROTATION", axis: "ROLL"|"PITCH"|"YAW", value: number }  // 도(°), 90° 배수 권장
- *   - [`"MOVE"`, axis, value] / [`"ROTATION"`, axis, value] 튜플(배열)도 동일 취급
- *
- * 내부 명령 트리플: ["MOVE", "RIGHT"|"LEFT"|..., cellSteps] | ["ROTATION", "ROLL"|..., deg]
+ * - 렌더: `meshes` / 경로·충돌: `solids` voxel
+ * - `assembly.failed_collisions`: 교착 부품 접촉 격자
+ * - `assembly.trajectories` 키: 0-based `"0".."K-1"`, 1-based `"1".."K"`, 또는 part name
+ * - 스텝: `{ type, axis, value }` 객체 또는 `["MOVE"|"ROTATION", axis, value]` 배열
  */
 
 import { decode } from '@msgpack/msgpack'
@@ -31,14 +24,14 @@ function toUint8Array(chunk) {
 		return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
 	}
 	if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk)
-	// msgpack 이 bin 을 number[] 로 풀어낸 경우 (구버전·다른 인코더)
+	// msgpack bin 이 number[] 로 디코드된 경우
 	if (Array.isArray(chunk) && chunk.length > 0) {
 		return Uint8Array.from(chunk)
 	}
 	return null
 }
 
-/** msgpack 필드명 호환: 팀 스펙은 `solids`, 예시 코드는 `parts` */
+/** msgpack solid 맵 (`solids` 또는 `parts`) */
 export function getSolidsMap(data) {
 	if (!data || typeof data !== 'object') return null
 	const s = data.solids ?? data.parts
@@ -146,7 +139,7 @@ export function voxelsForSolidFromDecoded(decoded, partKey) {
 	return flatGridToVoxels(flat, [Nx, Ny, Nz])
 }
 
-/** msgpack `solids` 의 compound id 를 숫자 오름차순 — 매니페스트 `parts[]` 순과 동일하다고 가정 */
+/** msgpack `solids` compound id 숫자 오름차순 (= `_solids.json` solids 배열 순) */
 export function compoundKeysInSolidOrder(decoded) {
 	const solids = getSolidsMap(decoded)
 	if (!solids || typeof solids !== 'object') return []

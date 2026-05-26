@@ -1,0 +1,14 @@
+{
+	"name": "assembly-validation",
+	"private": true,
+	"scripts": {
+		"postinstall": "npm install --prefix frontend",
+		"start:frontend": "npm --prefix frontend start",
+		"start:backend": "bash scripts/check-dc-env.sh",
+		"dev": "bash scripts/dev.sh",
+		"start": "npm run dev"
+	},
+	"engines": {
+		"node": ">=18.0.0"
+	}
+}

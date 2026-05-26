@@ -1,3 +1,6 @@
+"""
+assembly_validation — 개발 이력용. 운영 파이프라인은 assembly_validation_v3.py.
+"""
 import os
 import argparse
 import numpy as np

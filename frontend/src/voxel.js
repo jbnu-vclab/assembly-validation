@@ -1,7 +1,5 @@
 import * as THREE from 'three'
 
-// ——— NPY 파싱·그리드·좌표 (기존 voxel_npy.js) ———
-
 /**
  * @typedef {{ origin: number[], voxelSize: number, resolution: number[] | null }} GridMeta
  */
@@ -215,9 +213,8 @@ export function partPivotInCaseFrame(voxels, grid, mainAnchor, target) {
 	return box.getCenter(target)
 }
 
-// ——— InstancedMesh 복셀·대기열 레이아웃 (기존 voxel_graphics.js) ———
-
 /**
+ * InstancedMesh 복셀·대기열 레이아웃
  * 메인 패널: STEP 원점·격자 스텝에 맞춘 복셀(InstancedMesh).
  * @param {THREE.Vector3 | null} localPivot — 조립 파트만 부품 국소 원점(궤적 회전·스폰 정렬용)
  */
@@ -294,8 +291,6 @@ export const QUEUE_PREVIEW_TARGET_SIZE = 5.5
 export const QUEUE_DETAIL_TARGET_SIZE = 9
 /** 대기열에서 부품과 부품 사이 세로 여백 (목록 구분) */
 export const QUEUE_PART_GAP = 2.6
-/** @deprecated layoutQueueSlots 는 QUEUE_PART_GAP 사용 */
-export const QUEUE_SLOT_STEP = 6.8
 
 /**
  * 대기열: 부품 1개 = 미리보기 1개 (AABB 실루엣). 복셀을 셀마다 그리지 않음.
@@ -415,11 +410,6 @@ function createInstancedVoxelGroup(voxels, voxelSpec, cellWorldSize, getPosition
 	pushMesh(main, matMain)
 	pushMesh(accent, matAccent)
 	return group
-}
-
-/** grid 메타 없을 때만 사용(레거시) */
-export function createVoxelGroupFromSpec(voxels, voxelSpec) {
-	return createQueueVoxelGroup(voxels, voxelSpec)
 }
 
 export function mergeVoxelLists(partRows) {

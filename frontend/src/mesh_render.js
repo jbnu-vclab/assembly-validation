@@ -412,6 +412,6 @@ export function createQueueMeshGroup(
 	)
 	mesh.frustumCulled = false
 	group.add(mesh)
-	// collisionFailed: 대기열은 슬롯 배경·「충돌 발생」 라벨로 표시, mesh 는 meta 색 유지
+	// collisionFailed: 슬롯 배경·라벨로 표시, mesh 색은 meta 유지
 	return group
 }

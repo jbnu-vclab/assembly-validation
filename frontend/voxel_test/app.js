@@ -1,6 +1,6 @@
 /**
- * voxel_test 전용: STEP 업로드 → 기존 server.js 파이프라인 → 전체 solid 복셀 렌더.
- * 실행: frontend 에서 `npm start` 후 http://localhost:3000/voxel_test/index.html
+ * voxel_test: STEP 업로드 후 solid 복셀 렌더링 테스트.
+ * http://localhost:3000/voxel_test/
  */
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'

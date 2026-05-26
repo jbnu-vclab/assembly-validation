@@ -12,7 +12,7 @@ const REPO_ROOT = path.resolve(__dirname)
  * data/ 저장 규칙 (stem = 업로드 STEP 파일명에서 확장자 제외)
  * 1. step/<name>.step           — 업로드 STEP
  * 2. <stem>_solids.json         — 복셀 격자 메타 + solid별 UI 메타 (geometry는 msgpack)
- * 3. <stem>_assembly.msgpack    — 조립 순서·궤적 (assembly_validation.py 출력)
+ * 3. <stem>_assembly.msgpack    — 조립 순서·궤적 (assembly_validation_v3.py 출력)
  */
 const DATA_ROOT = path.join(REPO_ROOT, 'data')
 const DATASET_STEP_DIR = path.join(DATA_ROOT, 'step')
@@ -224,7 +224,7 @@ function runAssemblyPipeline(jobId, stepPath, stem) {
 		voxelSizeUsed,
 	]
 	console.log(
-		`[pipeline] ${path.basename(stepPath)} voxel_size=${voxelSizeUsed}mm → assembly_validation.py`
+		`[pipeline] ${path.basename(stepPath)} voxel_size=${voxelSizeUsed}mm → assembly_validation_v3.py`
 	)
 	const child = spawn('conda', args, {
 		cwd: BACKEND_ROOT,

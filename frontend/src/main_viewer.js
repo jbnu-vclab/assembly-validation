@@ -100,7 +100,7 @@ function buildQueuePartList(loadedParts, assembly, manifestParts, decodedFull) {
 			seen.add(nm)
 		}
 	}
-	// 분해 실패·궤적 없음 부품 포함 → solids 전체(예: Cleaner 15개)
+	// 조립 순서에 없는 부품(충돌·궤적 없음)도 대기열에 포함
 	for (const p of loadedParts) {
 		const nm = p.spec?.name
 		if (!nm || seen.has(nm) || !p.mesh?.vertices?.length) continue
@@ -190,7 +190,6 @@ async function main() {
 
 	let hasLoadedConfig = false
 
-	// Service-like overlay UI
 	const uiLayer = document.createElement('div')
 	uiLayer.style.position = 'fixed'
 	uiLayer.style.inset = '0'
@@ -585,7 +584,7 @@ async function main() {
 		const partsWithMesh = loadedParts.filter((p) => p.mesh?.vertices?.length)
 		if (partsWithMesh.length === 0) {
 			throw new Error(
-				'msgpack에 meshes 데이터가 없습니다. STEP을 다시 변환해 주세요 (assembly_validation.py mesh 포함).'
+				'msgpack에 meshes 데이터가 없습니다. STEP을 다시 업로드해 파이프라인을 재실행해 주세요.'
 			)
 		}
 
@@ -606,12 +605,10 @@ async function main() {
 		traverseSetLayer(assemblyStagingRoot, MAIN_VIEW_LAYER)
 		scene.add(assemblyStagingRoot)
 
-		/** 재생 전 메인: 조립 완료 pose mesh 미리보기 */
 		const mainPreviewRoot = new THREE.Group()
 		traverseSetLayer(mainPreviewRoot, MAIN_VIEW_LAYER)
 		scene.add(mainPreviewRoot)
 
-		/** 메인 미리보기는 사용하지 않음 — 재생·스크럽은 assemblyStagingRoot 만 */
 		function syncMainAssembledVisibility() {
 			mainPreviewRoot.visible = false
 		}
@@ -623,7 +620,6 @@ async function main() {
 			syncMainAssembledVisibility()
 		}
 
-		/** 초기·리셋: 메인 메쉬 없음, 스크럽 0초 */
 		function applyMainEmptyInitialView() {
 			assemblyPlayback?.returnToPrePlaybackIdle()
 			clearMainPreview()

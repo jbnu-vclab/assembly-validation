@@ -652,7 +652,7 @@ def voxelize_mesh_worker(index, vertices, faces, voxel_size, min_compound, resol
 def export_to_msgpack(filepath, resolution, voxel_size, min_bound, max_bound, 
                       voxels_dict, meshes_dict, assembly_sequence, raw_disassembly_paths, failed_collisions):
     """
-    [수정됨] meshes_dict를 추가로 전달받아 직렬화 페이로드에 포함합니다.
+    voxels·meshes·조립 궤적을 msgpack으로 직렬화합니다.
     """
     print(f"\n[STEP 4] 프론트엔드 전송용 MessagePack 직렬화 시작...")
     
@@ -670,12 +670,10 @@ def export_to_msgpack(filepath, resolution, voxel_size, min_bound, max_bound,
         compressed_bytes = np.packbits(voxel_grid.flatten()).tobytes()
         solids_data[str(idx)] = compressed_bytes
         
-    # 3. [추가] Mesh 데이터 바이너리 압축 (Float32, Int32)
+    # Mesh 데이터 바이너리 (Float32 vertices, Int32 faces)
     meshes_data = {}
     for idx, mesh_data in meshes_dict.items():
-        # JavaScript의 Float32Array로 읽기 용이하도록 타입 캐스팅 후 바이너리로 변환
         v_bytes = np.array(mesh_data["vertices"], dtype=np.float32).tobytes()
-        # Three.js의 BufferGeometry index로 활용하기 위해 Int32로 변환
         f_bytes = np.array(mesh_data["faces"], dtype=np.int32).tobytes()
         
         meshes_data[str(idx)] = {
@@ -717,7 +715,7 @@ def export_to_msgpack(filepath, resolution, voxel_size, min_bound, max_bound,
         for failed_part in failed_collisions.keys():
             write_trajectory_for_part(failed_part, is_failed=True)
 
-    # 실패한 부품의 좌표만 JSON 규격 문자열 Key로 변환
+    # 실패 부품 좌표 → JSON 호환 문자열 키
     formatted_failed_collisions = {}
     if failed_collisions:
         for part_idx, col_data in failed_collisions.items():
@@ -771,7 +769,7 @@ if __name__ == "__main__":
         tasks.append((index, vertices, faces, args.voxel_size, min_compound, resolution))
 
     voxels = dict()
-    meshes = dict() # [추가] 추출된 Mesh 원본을 저장할 딕셔너리
+    meshes = dict()
     
     num_cores = min(os.cpu_count() or 4, len(tasks))
     print(f"\n[STEP 3] {num_cores}개의 코어를 활용하여 병렬 Voxelization을 시작합니다...")
@@ -786,18 +784,14 @@ if __name__ == "__main__":
             for future in concurrent.futures.as_completed(futures):
                 idx = futures[future]
                 try:
-                    # [수정] 언패킹 튜플 길이를 5개로 확장하여 vertices, faces를 수신
                     result_idx, indices, verts, facs, err_msg = future.result()
                     
                     if err_msg is not None:
                         tqdm.write(f'🚨 Solid {idx} 에러 발생: {err_msg}')
                     elif indices is not None:
-                        # Voxel 데이터 저장
                         voxel_grid = np.zeros(resolution, dtype=bool)
                         voxel_grid[indices[:, 0], indices[:, 1], indices[:, 2]] = True
                         voxels[result_idx] = voxel_grid
-                        
-                        # [핵심] Mesh 원본 데이터도 딕셔너리에 함께 저장
                         meshes[result_idx] = {"vertices": verts, "faces": facs}
                         
                         pbar.set_postfix({
@@ -822,7 +816,7 @@ if __name__ == "__main__":
             min_bound=min_compound,
             max_bound=max_compound,
             voxels_dict=voxels,
-            meshes_dict=meshes,  # [추가] Mesh 데이터 인자 전달
+            meshes_dict=meshes,
             assembly_sequence=sequence,
             raw_disassembly_paths=raw_paths,
             failed_collisions=failed_cols  

@@ -41,7 +41,7 @@ export {
 	getMeshesMap,
 } from './assembly_trajectory.js'
 
-// ——— 조립 애니: msgpack 궤적 재생 → 완료 시 test 뷰어와 동일한 격자 배치 ———
+// 조립 msgpack 궤적 재생
 
 const ASSEMBLY_PLAYBACK_RATE = 0.4
 const MOVE_SPEED_CELLS_PER_SEC = 10.5 * ASSEMBLY_PLAYBACK_RATE
@@ -522,7 +522,7 @@ export function createAssemblyPlayback(ctx) {
 	}
 
 	/**
-	 * test 뷰어와 동일: 케이스 프레임에서 부품 AABB 중심 = 조립 완료 시 group.position.
+	 * 조립 완료 pose: 케이스 프레임에서 부품 mesh AABB 중심.
 	 * @param {QueuePart} part
 	 */
 	function assembledPositionForPart(part) {
