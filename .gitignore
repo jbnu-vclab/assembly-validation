@@ -1,0 +1,33 @@
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.local
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# STEP 업로드·파이프라인 산출물 (clone 후 로컬에서 생성)
+frontend/data/*
+!frontend/data/.gitkeep
+!frontend/data/step/
+frontend/data/step/*
+!frontend/data/step/.gitkeep
