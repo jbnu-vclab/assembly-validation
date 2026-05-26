@@ -8,7 +8,7 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 ├── README.md
 ├── LICENSE
 ├── package.json              ← npm start / npm run dev
-├── requirements.txt          ← Python pip (conda env `dc`)
+├── requirements.txt          ← pip (conda activate `dc` 후 설치)
 ├── scripts/
 │   ├── check-dc-env.sh       ← conda `dc` 사전 검사
 │   └── dev.sh
@@ -49,21 +49,35 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 
 저장소 clone 후 **저장소 루트**에서:
 
-### 1. Conda `dc`
+### 1. Conda 환경 `dc`
+
+환경을 만든 뒤 **activate한 상태에서** 패키지를 설치합니다. (`conda install -n dc ...` 대신 이 흐름을 권장합니다.)
 
 ```bash
 conda create -n dc python=3.10 -y
-conda install -n dc -c conda-forge numpy trimesh open3d pythonocc-core -y
-conda run -n dc pip install -r requirements.txt
+conda activate dc
+
+conda install -c conda-forge numpy trimesh open3d pythonocc-core -y
+conda install -c lambouj -c conda-forge occwl -y
+pip install -r requirements.txt
 ```
 
-확인:
+확인 (여전히 `dc`가 activate된 터미널에서):
 
 ```bash
-conda run -n dc python -c "import numpy, trimesh, open3d; from occwl.compound import Compound; import msgpack, tqdm; print('dc ok')"
+python -c "import numpy, trimesh, open3d; from occwl.compound import Compound; import msgpack, tqdm; print('dc ok')"
 ```
 
-환경 이름이 `dc`가 아니면 `frontend/server.js`의 `conda run -n dc`를 수정하세요.
+설치가 끝나면 Node 쪽 작업을 위해 deactivate 해도 됩니다.
+
+```bash
+conda deactivate
+```
+
+- **`occwl`은 pip가 아니라 conda** (`lambouj` 채널)로 설치합니다.
+- **`requirements.txt`는 msgpack·tqdm만** 포함합니다.
+- 환경 이름을 `dc`가 아니게 쓰면 `frontend/server.js`와 `scripts/check-dc-env.sh`의 `dc`를 같이 바꾸세요.
+- **`npm start`는 `(base)` 터미널에서 실행**하면 됩니다. 서버가 STEP 변환 시 `conda run -n dc`로 Python을 호출합니다 (activate 유지 불필요).
 
 ### 2. Node
 
@@ -153,7 +167,9 @@ clone 직후에는 `frontend/data/.gitkeep`, `frontend/data/step/.gitkeep`만 �
 - v3: 교착 부품 접근 궤적 + `failed_collisions`
 
 ```bash
-conda run -n dc python -u backend/assembly_validation_v3.py -s <step_path> -v <voxel_mm>
+conda activate dc
+python -u backend/assembly_validation_v3.py -s <step_path> -v <voxel_mm>
+conda deactivate
 ```
 
 중간 출력 `backend/assembly_data.msgpack` → 서버가 `frontend/data/<stem>_*.json/msgpack`으로 저장.
@@ -175,7 +191,11 @@ Three.js: CDN `three@0.170.0`
 
 ## 문제 해결
 
-**conda / `dc` 없음** — 위 [설치](#1-conda-dc) 절차.
+**conda / `dc` 없음** — 위 [설치](#1-conda-환경-dc) 절차.
+
+**`occwl` pip 설치 실패** — PyPI에 없습니다. `conda install -c lambouj -c conda-forge occwl` 사용.
+
+**`pythonocc-core` conda 충돌** — `conda activate dc` 후 설치하고, Python 3.10 환경을 유지하세요.
 
 **`assembly_data.msgpack 없음`** — 터미널 `[pipeline]` 로그 확인. `PIPELINE_VOXEL_SIZE` 조정.
 

@@ -1,10 +1,10 @@
-# Python pip dependencies (conda env `dc`)
+# pip dependencies — conda env `dc` activate 후 설치
 #
-# conda-forge 로 먼저 설치:
-#   numpy, trimesh, open3d, pythonocc-core
+# conda (activate dc):
+#   conda install -c conda-forge numpy trimesh open3d pythonocc-core
+#   conda install -c lambouj -c conda-forge occwl
 #
-# 그다음 (Project 루트에서):
-#   conda run -n dc pip install -r requirements.txt
+# pip (저장소 루트):
+#   pip install -r requirements.txt
 msgpack>=1.0.0
 tqdm>=4.0.0
-occwl
