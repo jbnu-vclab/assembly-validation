@@ -3,6 +3,7 @@
 	"private": true,
 	"scripts": {
 		"postinstall": "npm install --prefix frontend",
+		"setup:python": "bash scripts/patch-occwl.sh",
 		"start:frontend": "npm --prefix frontend start",
 		"start:backend": "bash scripts/check-dc-env.sh",
 		"dev": "bash scripts/dev.sh",

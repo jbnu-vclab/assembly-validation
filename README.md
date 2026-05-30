@@ -11,6 +11,7 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 ├── requirements.txt          ← pip (conda activate `dc` 후 설치)
 ├── scripts/
 │   ├── check-dc-env.sh       ← conda `dc` 사전 검사
+│   ├── patch-occwl.sh        ← occwl + pythonocc-core 7.9 호환 패치
 │   └── dev.sh
 ├── backend/
 │   ├── assembly_validation_v3.py   ← 운영 파이프라인 (서버가 호출)
@@ -35,7 +36,7 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 
 **stem**: 파일명에서 확장자 제외. 예: `Cleaner.step` → `Cleaner`
 
-백엔드는 **상시 HTTP 서버가 아닙니다.** STEP 업로드마다 Python subprocess가 1회 실행됩니다. `npm start` 시 `scripts/check-dc-env.sh`로 conda `dc` 준비 여부만 먼저 확인합니다.
+백엔드는 **상시 HTTP 서버가 아닙니다.** STEP 업로드마다 Python subprocess가 1회 실행됩니다. `npm start` 시 `scripts/check-dc-env.sh`로 conda `dc` 준비 여부를 확인하고, 필요 시 `patch-occwl.sh`를 자동 실행합니다.
 
 ## 요구사항
 
@@ -47,7 +48,18 @@ STEP CAD 파일을 업로드하면 **조립 가능성·충돌(교착)** 을 분�
 
 ## 설치
 
-저장소 clone 후 **저장소 루트**에서:
+### 0. Clone (main 브랜치 병합 전)
+
+```bash
+git clone -b integration https://github.com/jbnu-vclab/assembly-validation.git
+cd assembly-validation
+```
+
+빈 폴더에 clone할 때:
+
+```bash
+git clone -b integration https://github.com/jbnu-vclab/assembly-validation.git .
+```
 
 ### 1. Conda 환경 `dc` (Python + Node)
 
@@ -59,6 +71,7 @@ conda activate dc
 
 conda install -c conda-forge numpy trimesh pythonocc-core nodejs -y
 pip install -r requirements.txt
+bash scripts/patch-occwl.sh
 ```
 
 확인 (`dc` activate 상태):
@@ -73,8 +86,10 @@ node -v && npm -v
 **`dc` activate 상태**에서 저장소 루트:
 
 ```bash
-npm install    # frontend/ 의존성도 postinstall 로 설치
+npm install
 ```
+
+`postinstall` 스크립트가 `frontend/` 의존성도 함께 설치합니다.
 
 - **`open3d`·`occwl`은 pip** (`requirements.txt`). `occwl`은 PyPI에 없어 GitHub에서 설치합니다.
 - **`requirements.txt`**: open3d, occwl(GitHub), msgpack, tqdm.
@@ -95,6 +110,7 @@ npm start
 | 명령 | 설명 |
 |------|------|
 | `npm start` | conda `dc` 검사 → 프론트 서버 |
+| `npm run setup:python` | occwl 패치만 재실행 |
 | `npm run start:frontend` | 프론트만 |
 | `npm run start:backend` | conda 검사만 |
 | `cd frontend && npm start` | 프론트만 (검사 생략) |
@@ -185,22 +201,6 @@ conda deactivate
 | `frontend/src/assembly_trajectory.js` | msgpack 파싱 |
 
 Three.js: CDN `three@0.170.0`
-
-## 문제 해결
-
-**conda / `dc` 없음** — 위 [설치](#1-conda-환경-dc) 절차.
-
-**`occwl` conda 설치 실패** — `open3d`·`occwl`을 conda가 아니라 `pip install -r requirements.txt`로 설치하세요. `occwl`은 PyPI에 없고 GitHub URL로 설치됩니다.
-
-**`npm: command not found`** — `conda activate dc` 후 실행하세요. README 1단계에서 `nodejs` conda 설치가 필요합니다.
-
-**`pythonocc-core` conda 충돌** — `conda activate dc` 후 설치하고, Python 3.10 환경을 유지하세요.
-
-**`assembly_data.msgpack 없음`** — 터미널 `[pipeline]` 로그 확인. `PIPELINE_VOXEL_SIZE` 조정.
-
-**mesh 데이터 없음** — STEP 재업로드 (v3 파이프라인 필요).
-
-**`data/`가 git에 없음** — 정상. 업로드 후 로컬 생성.
 
 ## 라이선스
 
