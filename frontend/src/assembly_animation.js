@@ -18,6 +18,7 @@ import {
 	partPivotInCaseFrameFromMesh,
 	expandBoxByMeshWorld,
 	collisionPositionInCaseFrame,
+	contactOffsetInCaseFrameFromMesh,
 	createCollisionFogGroup,
 	updateCollisionFogPulse,
 } from './mesh_render.js'
@@ -176,7 +177,7 @@ export function createAssemblyPlayback(ctx) {
 
 	function clearCollisionFog() {
 		if (collisionFogGroup) {
-			assemblyStagingRoot.remove(collisionFogGroup)
+			collisionFogGroup.parent?.remove(collisionFogGroup)
 			collisionFogGroup = null
 		}
 	}
@@ -196,34 +197,53 @@ export function createAssemblyPlayback(ctx) {
 		}
 	}
 
-	function attachCollisionFog(col) {
+	/**
+	 * 충돌 안개: 부품은 궤적 끝 pose 유지, 접촉 복셀은 mesh pivot 기준 로컬 오프셋.
+	 * @param {import('./mesh_render.js').MeshData | null} [meshData]
+	 * @param {THREE.Group | null} [partGroup]
+	 */
+	function attachCollisionFog(col, partGroup = null, meshData = null) {
 		clearCollisionFog()
 		if (!col) return
+
+		const drawOrder = stagingDrawOrder + 20
+		if (
+			partGroup &&
+			meshData?.vertices?.length &&
+			gridMeta?.origin &&
+			gridMeta.voxelSize
+		) {
+			contactOffsetInCaseFrameFromMesh(
+				meshData,
+				col,
+				gridMeta,
+				mainAnchorVec,
+				offsetScratch
+			)
+			collisionFogGroup = createCollisionFogGroup(animCellSize, offsetScratch)
+			traverseSetLayer(collisionFogGroup, MAIN_VIEW_LAYER)
+			collisionFogGroup.traverse((obj) => {
+				if (obj.isMesh) obj.renderOrder = drawOrder
+			})
+			partGroup.add(collisionFogGroup)
+			return
+		}
+
 		const pos = collisionFogPositionInCaseFrame(col)
 		collisionFogGroup = createCollisionFogGroup(animCellSize, pos)
 		traverseSetLayer(collisionFogGroup, MAIN_VIEW_LAYER)
 		collisionFogGroup.traverse((obj) => {
-			if (obj.isMesh) obj.renderOrder = stagingDrawOrder + 20
+			if (obj.isMesh) obj.renderOrder = drawOrder
 		})
 		assemblyStagingRoot.add(collisionFogGroup)
 	}
 
-	/** 교착 부품: 궤적 종료 후 mesh pivot 을 충돌 격자 셀 중심에 맞춤 (v3 충돌-끝 pose) */
-	function snapFailedPartToCollisionGrid(group, partName) {
-		const part = partRowByName(partName)
-		const col = part?.failedCollision
-		if (!group || !col) return
-		group.position.copy(collisionFogPositionInCaseFrame(col))
-		group.quaternion.identity()
-	}
-
-	/** 충돌 격자 pose + 안개 (부품 전체 적색 없음) */
+	/** 궤적 종료 직후: 부품 위치 유지 + 접촉 지점만 안개 */
 	function beginCollisionFogPhase() {
 		const nm = stagingAnimState.entry.name
 		const g = stagingAnimState.entry.group
-		if (g) snapFailedPartToCollisionGrid(g, nm)
 		const part = partRowByName(nm)
-		attachCollisionFog(part?.failedCollision ?? null)
+		attachCollisionFog(part?.failedCollision ?? null, g, part?.mesh ?? null)
 		stagingAnimState.phase = 'COLLISION_FOG'
 		stagingAnimState.phaseDuration = COLLISION_FOG_HOLD_SEC
 		stagingAnimState.phaseTime = 0
@@ -393,6 +413,7 @@ export function createAssemblyPlayback(ctx) {
 			})
 			const g = stagingAnimState.entry.group
 			const cmds = assemblyTrajMapRef[activeFogSeg.partName] ?? []
+			const fogPart = partRowByName(activeFogSeg.partName)
 			if (g && cmds.length > 0) {
 				applySpawnPosition(g, cmds, activeFogSeg.seqIndex)
 				for (let c = 0; c < cmds.length; c += 1) {
@@ -401,12 +422,14 @@ export function createAssemblyPlayback(ctx) {
 				}
 				stagingAnimState.cursor = cmds.length
 				stagingAnimState.phase = null
-				snapFailedPartToCollisionGrid(g, activeFogSeg.partName)
 			} else if (g) {
 				applySpawnPosition(g, cmds, activeFogSeg.seqIndex)
-				snapFailedPartToCollisionGrid(g, activeFogSeg.partName)
 			}
-			attachCollisionFog(activeFogSeg.collision)
+			attachCollisionFog(
+				activeFogSeg.collision,
+				g,
+				fogPart?.mesh ?? null
+			)
 			stagingAnimState.phase = 'COLLISION_FOG'
 			stagingAnimState.phaseDuration = COLLISION_FOG_HOLD_SEC
 			stagingAnimState.phaseTime = Math.max(
