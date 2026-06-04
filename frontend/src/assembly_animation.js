@@ -42,7 +42,7 @@ export {
 	getMeshesMap,
 } from './assembly_trajectory.js'
 
-// 조립 msgpack 궤적 재생
+// 조립 msgpack 궤적 재생 — 재생 중: MOVE·ROTATION 궤적 그대로 / 완료·표시: CAD pivot·회전 0
 
 const ASSEMBLY_PLAYBACK_RATE = 0.4
 const MOVE_SPEED_CELLS_PER_SEC = 10.5 * ASSEMBLY_PLAYBACK_RATE
@@ -64,18 +64,6 @@ function commandDurationSec(cmd) {
 		return Math.max(0, Math.abs(Number(value)) / MOVE_SPEED_CELLS_PER_SEC)
 	}
 	return Math.max(0, Math.abs(Number(value)) / ROTATION_SPEED_DEG_PER_SEC)
-}
-
-function escapeOffsetFromCommands(commands, cellSize) {
-	const v = new THREE.Vector3(0, 0, 0)
-	for (const cmd of commands) {
-		if (!cmd || cmd[0] !== 'MOVE') continue
-		const [, dir, cells] = cmd
-		const axis = DIR_TO_WORLD_AXIS[dir]
-		if (!axis) continue
-		v.addScaledVector(axis, -Number(cells) * cellSize)
-	}
-	return v
 }
 
 /**
@@ -193,7 +181,8 @@ export function createAssemblyPlayback(ctx) {
 			const nm = p.spec?.name
 			if (!nm || failedOrderNames.includes(nm)) continue
 			if (!p.mesh?.vertices?.length) continue
-			addAssembledPartMesh(nm)
+			const si = assemblyOrderNames.indexOf(nm)
+			addAssembledPartMesh(nm, si >= 0 ? si : 0)
 		}
 	}
 
@@ -329,7 +318,9 @@ export function createAssemblyPlayback(ctx) {
 		if (state.phase === 'MOVE') {
 			state.entry.group.position.lerpVectors(state.fromPos, state.toPos, t)
 		} else {
-			state.entry.group.quaternion.copy(state.fromQuat).slerp(state.toQuat, t)
+			state.entry.group.quaternion
+				.copy(state.fromQuat)
+				.slerp(state.toQuat, t)
 		}
 	}
 
@@ -352,7 +343,18 @@ export function createAssemblyPlayback(ctx) {
 			state.cursor = cmds.length
 			state.phase = null
 			state.phaseTime = 0
+			if (state.entry.group) {
+				freezePartAtCadDisplayPose(state.entry.group)
+			}
 		}
+	}
+
+	/**
+	 * 조립 완료·스크럽·이전 부품 표시 — STEP mesh 기준 (pivot + 회전 0).
+	 * 재생 중 궤적 끝(회전 포함)과 달라 최종 CAD 정렬용.
+	 */
+	function freezePartAtCadDisplayPose(group) {
+		applyCadAssembledPose(group)
 	}
 
 	function seekToTime(targetTime) {
@@ -420,10 +422,11 @@ export function createAssemblyPlayback(ctx) {
 					beginPartCommand(stagingAnimState, cmds[c])
 					finishPartCommand(stagingAnimState, cmds[c])
 				}
+				freezePartAtCadDisplayPose(g)
 				stagingAnimState.cursor = cmds.length
 				stagingAnimState.phase = null
 			} else if (g) {
-				applySpawnPosition(g, cmds, activeFogSeg.seqIndex)
+				applyCadAssembledPose(g)
 			}
 			attachCollisionFog(
 				activeFogSeg.collision,
@@ -456,7 +459,7 @@ export function createAssemblyPlayback(ctx) {
 			assemblyPlaybackActive = true
 		} else if (activeCommand) {
 			for (let i = 0; i < activeCommand.seqIndex; i += 1) {
-				addAssembledPartMesh(assemblyOrderNames[i])
+				addAssembledPartMesh(assemblyOrderNames[i], i)
 			}
 			assemblySeqIndex = activeCommand.seqIndex
 			spawnStagingPartForName(activeCommand.partName, {
@@ -487,7 +490,7 @@ export function createAssemblyPlayback(ctx) {
 				const nextName = assemblyOrderNames[nextIdx]
 				const nextCmds = assemblyTrajMapRef[nextName] ?? []
 				for (let i = 0; i < nextIdx; i += 1) {
-					addAssembledPartMesh(assemblyOrderNames[i])
+					addAssembledPartMesh(assemblyOrderNames[i], i)
 				}
 				assemblySeqIndex = nextIdx
 				if (nextCmds.length > 0) {
@@ -503,12 +506,12 @@ export function createAssemblyPlayback(ctx) {
 					}
 					assemblyPlaybackActive = true
 				} else {
-					addAssembledPartMesh(nextName)
+					addAssembledPartMesh(nextName, nextIdx)
 					assemblyPlaybackActive = true
 				}
 			} else {
 				for (let i = 0; i < assemblyOrderNames.length; i += 1) {
-					addAssembledPartMesh(assemblyOrderNames[i])
+					addAssembledPartMesh(assemblyOrderNames[i], i)
 				}
 				assemblyPlaybackActive = true
 			}
@@ -556,9 +559,9 @@ export function createAssemblyPlayback(ctx) {
 		return new THREE.Vector3(0, 0, 0)
 	}
 
-	/** @param {THREE.Object3D} group */
-	function snapGroupToAssembledPose(group) {
-		if (!group || !gridMeta) return
+	/** mesh pivot @ assembledPosition, 회전 0 (궤적 없음·폴백) */
+	function applyCadAssembledPose(group) {
+		if (!group) return
 		const ap = group.userData.assembledPosition
 		if (ap instanceof THREE.Vector3) {
 			group.position.copy(ap)
@@ -568,30 +571,97 @@ export function createAssemblyPlayback(ctx) {
 		group.quaternion.identity()
 	}
 
-	/**
-	 * @param {THREE.Object3D} group
-	 * @param {unknown[][]} commands
-	 * @param {number} seqIndex
-	 */
-	function applySpawnPosition(group, commands, seqIndex) {
-		const ap = group.userData.assembledPosition
-		if (!(ap instanceof THREE.Vector3)) {
-			group.position.set(0, 0, 0)
+	/** @param {THREE.Object3D} group @param {unknown[]} cmd @param {number} cellSize */
+	function applyInverseCommandOnGroup(group, cmd, cellSize) {
+		const [type, dir, value] = cmd
+		if (type === 'MOVE') {
+			const axis = DIR_TO_WORLD_AXIS[dir]
+			if (axis) {
+				group.position.addScaledVector(axis, -Number(value) * cellSize)
+			}
 			return
 		}
-		if (!assemblyUseEscapeSpawn) {
-			group.position.copy(ap)
+		if (type === 'ROTATION') {
+			const axis = ROTATION_AXIS_TO_WORLD_AXIS[dir]?.clone()?.normalize()
+			if (!axis) return
+			const angleRad = THREE.MathUtils.degToRad(-Number(value))
+			const qDelta = new THREE.Quaternion().setFromAxisAngle(axis, angleRad)
+			group.quaternion.premultiply(qDelta)
+		}
+	}
+
+	/**
+	 * 궤적 시작 pose = 조립 pivot 에서 MOVE·ROTATION 역순 적용 (분해 역재생 spawn).
+	 */
+	function applyPathStartPose(group, commands, assembledPos, seqIndex) {
+		if (!(assembledPos instanceof THREE.Vector3)) {
+			group.position.set(0, 0, 0)
+			group.quaternion.identity()
+			return
+		}
+		if (!commands?.length) {
+			group.position.copy(assembledPos)
+			group.quaternion.identity()
 			return
 		}
 		if (assemblySharedSpawnNext && seqIndex > 0) {
 			group.position.copy(sequentialSharedStagingOrigin)
+			group.quaternion.identity()
 			return
 		}
-		offsetScratch.copy(escapeOffsetFromCommands(commands, animCellSize))
-		group.position.copy(ap).add(offsetScratch)
+		group.position.copy(assembledPos)
+		group.quaternion.identity()
+		for (let i = commands.length - 1; i >= 0; i -= 1) {
+			applyInverseCommandOnGroup(group, commands[i], animCellSize)
+		}
 		if (assemblySharedSpawnNext && seqIndex === 0) {
 			sequentialSharedStagingOrigin.copy(group.position)
 		}
+	}
+
+	/** 궤적 전체 적용 → 재생 끝·완료 부품 pose */
+	function applyTrajectoryEndPose(group, commands, assembledPos, seqIndex) {
+		if (!(assembledPos instanceof THREE.Vector3)) {
+			group.position.set(0, 0, 0)
+			group.quaternion.identity()
+			return
+		}
+		if (!commands?.length) {
+			group.position.copy(assembledPos)
+			group.quaternion.identity()
+			return
+		}
+		applyPathStartPose(group, commands, assembledPos, seqIndex)
+		const simState = {
+			entry: { name: '', group },
+			commands,
+			cursor: 0,
+			phase: null,
+			phaseTime: 0,
+			phaseDuration: 0,
+			fromPos: new THREE.Vector3(),
+			toPos: new THREE.Vector3(),
+			fromQuat: new THREE.Quaternion(),
+			toQuat: new THREE.Quaternion(),
+		}
+		for (const cmd of commands) {
+			beginPartCommand(simState, cmd)
+			finishPartCommand(simState, cmd)
+		}
+	}
+
+	function applySpawnPosition(group, commands, seqIndex) {
+		const ap = group.userData.assembledPosition
+		if (!(ap instanceof THREE.Vector3)) {
+			group.position.set(0, 0, 0)
+			group.quaternion.identity()
+			return
+		}
+		if (!assemblyUseEscapeSpawn) {
+			applyCadAssembledPose(group)
+			return
+		}
+		applyPathStartPose(group, commands, ap, seqIndex)
 	}
 
 	function spawnStagingPartForName(partName, opts = {}) {
@@ -729,7 +799,6 @@ export function createAssemblyPlayback(ctx) {
 		}
 		applySpawnPosition(g, cmds, globalIdx)
 		if (cmds.length === 0) {
-			applySpawnPosition(g, cmds, globalIdx)
 			beginCollisionFogPhase()
 			return true
 		}
@@ -748,7 +817,7 @@ export function createAssemblyPlayback(ctx) {
 		}
 
 		if (g && !isFailedPart) {
-			snapGroupToAssembledPose(g)
+			freezePartAtCadDisplayPose(g)
 		}
 		if (assemblyStopAfterCurrentPart && !isFailedPart) {
 			finishAssemblyPlaybackUI()
@@ -775,8 +844,8 @@ export function createAssemblyPlayback(ctx) {
 		finishAssemblyPlaybackUI()
 	}
 
-	/** @param {string} partName */
-	function addAssembledPartMesh(partName) {
+	/** @param {string} partName @param {number} [seqIndex] */
+	function addAssembledPartMesh(partName, seqIndex) {
 		const part = queuePartList.find((p) => p.spec?.name === partName)
 		if (!part) return null
 
@@ -797,7 +866,7 @@ export function createAssemblyPlayback(ctx) {
 		g.traverse((obj) => {
 			if (obj.isMesh) obj.renderOrder = drawOrder
 		})
-		snapGroupToAssembledPose(g)
+		applyCadAssembledPose(g)
 		assemblyStagingRoot.add(g)
 		return g
 	}
@@ -826,7 +895,7 @@ export function createAssemblyPlayback(ctx) {
 
 			const cmds0 = stagingAnimState.commands
 			if (cmds0.length === 0) {
-				snapGroupToAssembledPose(g0)
+				applyCadAssembledPose(g0)
 				assemblySeqIndex += 1
 				continue
 			}
@@ -1118,14 +1187,14 @@ export function createAssemblyPlayback(ctx) {
 		resetStagingForPlayback()
 
 		for (let i = 0; i < seqIndex; i += 1) {
-			addAssembledPartMesh(assemblyOrderNames[i])
+			addAssembledPartMesh(assemblyOrderNames[i], i)
 		}
 
 		assemblyPlaybackActive = startStagingSequenceFromCurrentIndex()
 		if (!assemblyPlaybackActive) {
 			const nm = assemblyOrderNames[seqIndex]
 			if (nm) {
-				addAssembledPartMesh(nm)
+				addAssembledPartMesh(nm, seqIndex)
 			}
 			finishAssemblyPlaybackUI()
 			if (typeof onMainCameraLayout === 'function') {
