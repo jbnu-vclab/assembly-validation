@@ -32,6 +32,35 @@ class AssemblyVisualizer:
 
         self._plotter = pv.Plotter(window_size=window_size)
         self._plotter.set_background("white")
+        self._local_meshes: dict[int, pv.PolyData] = {}
+        self._solid_actors: dict[int, pv.Actor] = {}
+
+    def register_solid(
+        self,
+        solid_index: int,
+        mesh: Trimesh,
+        color: Tuple[float, float, float],
+    ) -> None:
+        """로컬 좌표 mesh를 solid index에 등록한다."""
+        if solid_index in self._solid_actors:
+            raise VisualizationException(
+                f"solid index {solid_index} is already registered"
+            )
+
+        pyvista_mesh = self._to_pyvista_mesh(mesh)
+        actor = self._plotter.add_mesh(pyvista_mesh, color=color, show_edges=True)
+        actor.user_matrix = np.eye(4)
+        self._local_meshes[solid_index] = pyvista_mesh
+        self._solid_actors[solid_index] = actor
+
+    def update_solid_state(self, solid_index: int, state: State) -> None:
+        """등록된 solid actor의 변환 행렬을 갱신한다."""
+        if solid_index not in self._solid_actors:
+            raise VisualizationException(
+                f"solid index {solid_index} is not registered"
+            )
+
+        self._solid_actors[solid_index].user_matrix = state.to_transformation_matrix()
 
     def add_solid(
         self,
@@ -39,14 +68,26 @@ class AssemblyVisualizer:
         state: State,
         color: Tuple[float, float, float],
     ) -> None:
-        """Trimesh 부품을 주어진 State 변환을 적용해 Plotter에 추가한다."""
-        pyvista_mesh = self._to_pyvista_mesh(mesh)
-        transformed_mesh = self._apply_state(pyvista_mesh, state)
-        self._plotter.add_mesh(transformed_mesh, color=color, show_edges=True)
+        """Trimesh 부품을 등록하고 주어진 State 변환을 적용한다."""
+        solid_index = len(self._solid_actors)
+        self.register_solid(solid_index, mesh, color)
+        self.update_solid_state(solid_index, state)
+
+    def get_plotter(self) -> pv.Plotter:
+        """내부 PyVista Plotter를 반환한다."""
+        return self._plotter
+
+    def render(self) -> None:
+        """현재 장면을 한 프레임 렌더링한다."""
+        self._plotter.render()
 
     def show(self) -> None:
         """Plotter 창을 연다."""
         self._plotter.show()
+
+    def render_screenshot(self, output_path: str) -> None:
+        """현재 장면을 이미지 파일로 저장한다."""
+        self._plotter.show(screenshot=output_path, auto_close=False)
 
     def _to_pyvista_mesh(self, mesh: Trimesh) -> pv.PolyData:
         if mesh.vertices.size == 0 or mesh.faces.size == 0:
@@ -56,8 +97,3 @@ class AssemblyVisualizer:
             [np.full((len(mesh.faces), 1), 3, dtype=np.int64), mesh.faces.astype(np.int64)]
         ).ravel()
         return pv.PolyData(mesh.vertices, faces)
-
-    def _apply_state(self, mesh: pv.PolyData, state: State) -> pv.PolyData:
-        transformed_mesh = mesh.copy(deep=True)
-        transformed_mesh.transform(state.to_transformation_matrix(), inplace=True)
-        return transformed_mesh
