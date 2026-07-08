@@ -17,7 +17,9 @@ conda env create -f environment.yml
     ├── loader.py : step loader and mesh converter using occwl and trimesh
 ├── test/
 ├── visualization/
-    ├── visualizer.py : result visualizer using PyVista or Open3D
+    ├── visualizer.py : static mesh visualizer using PyVista
+    ├── animator.py : trajectory playback module
+    ├── result_loader.py : msgpack result loader for visualization
 ├── main.py
 ```
 ## Output Structure
