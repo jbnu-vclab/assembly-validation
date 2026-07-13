@@ -48,7 +48,13 @@ class AssemblyVisualizer:
             )
 
         pyvista_mesh = self._to_pyvista_mesh(mesh)
-        actor = self._plotter.add_mesh(pyvista_mesh, color=color, show_edges=True)
+        actor = self._plotter.add_mesh(
+            pyvista_mesh,
+            color=color,
+            show_edges=False,
+            smooth_shading=True,
+            split_sharp_edges=True,
+        )
         actor.user_matrix = np.eye(4)
         self._local_meshes[solid_index] = pyvista_mesh
         self._solid_actors[solid_index] = actor
