@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>지능형 조립성 검증 보조시스템</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <!-- [디버그 모드][나중에 삭제] -->
+    <link rel="stylesheet" href="/src/debug_style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="app-header">
+        <div class="brand-block">
+          <h1 class="brand-title">지능형 조립성 검증 보조시스템 <span style="opacity:0.55">PRO_v1.0</span></h1>
+        </div>
+
+        <div class="header-summary">
+          <!-- [디버그 모드][나중에 삭제] 모드 토글: 정상 부품 왼쪽에 배치 -->
+          <div class="mode-toggle" role="group" aria-label="Mode toggle">
+            <button id="service-mode-button" class="mode-toggle-button is-active" type="button">Service Mode</button>
+            <button id="debug-mode-button" class="mode-toggle-button" type="button">Debug Mode</button>
+          </div>
+
+          <div class="summary-chip is-ok">
+            <span class="dot"></span>
+            <span>정상 부품 <strong id="summary-normal">0/0</strong></span>
+          </div>
+          <div class="summary-chip is-collision">
+            <span class="dot"></span>
+            <span>충돌 감지 <strong id="summary-collision">—</strong></span>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <!-- [디버그 모드][나중에 삭제] 중간 액션 슬롯(너비 고정으로 Export 위치 유지) -->
+          <div class="header-action-slot">
+            <div id="service-actions" class="header-action-group">
+              <button id="open-button" class="btn" type="button">Load STEP</button>
+              <button id="assemble-button" class="btn btn-primary" type="button" disabled>조립 계산</button>
+            </div>
+
+            <div id="debug-actions" class="header-action-group hidden">
+              <!-- [디버그 모드][나중에 삭제] -->
+              <div class="debug-load-wrap">
+                <button id="load-assembly-button" class="btn btn-primary" type="button">Load Assembly</button>
+                <div id="debug-assembly-picker" class="debug-assembly-picker hidden" role="menu" aria-label="Assembly target">
+                  <button
+                    id="load-cleaner-assembly-button"
+                    class="debug-assembly-option"
+                    type="button"
+                    role="menuitem"
+                    title="기대 mesh 15"
+                  >
+                    Cleaner
+                  </button>
+                  <button
+                    id="load-hair-dryer-assembly-button"
+                    class="debug-assembly-option"
+                    type="button"
+                    role="menuitem"
+                    title="기대 mesh 16"
+                  >
+                    Hair Dryer
+                  </button>
+                </div>
+              </div>
+              <span class="debug-bug" title="Debug Mode" aria-hidden="true">
+                <svg viewBox="0 0 64 64" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
+                  <ellipse cx="32" cy="36" rx="16" ry="18" fill="#6ecf7a"/>
+                  <ellipse cx="32" cy="36" rx="16" ry="18" fill="none" stroke="#2f6b3a" stroke-width="2"/>
+                  <path d="M32 18v36" stroke="#2f6b3a" stroke-width="2"/>
+                  <circle cx="24" cy="30" r="2.2" fill="#1b4332"/>
+                  <circle cx="40" cy="30" r="2.2" fill="#1b4332"/>
+                  <circle cx="24" cy="40" r="2.2" fill="#1b4332"/>
+                  <circle cx="40" cy="40" r="2.2" fill="#1b4332"/>
+                  <circle cx="32" cy="14" r="7" fill="#8be09a" stroke="#2f6b3a" stroke-width="2"/>
+                  <circle cx="29" cy="13" r="1.4" fill="#1b4332"/>
+                  <circle cx="35" cy="13" r="1.4" fill="#1b4332"/>
+                  <path d="M26 8c-4-4-9-3-10-1" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M38 8c4-4 9-3 10-1" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M18 28c-5-2-8 1-9 4" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M46 28c5-2 8 1 9 4" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M17 42c-5 1-7 5-7 8" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M47 42c5 1 7 5 7 8" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <input id="assembly-file-input" type="file" accept=".msgpack,application/octet-stream" hidden />
+            </div>
+          </div>
+
+          <button id="export-button" class="btn" type="button">Export Report</button>
+          <input id="file-input" type="file" accept=".step,.stp,model/step" hidden />
+        </div>
+      </header>
+
+      <div id="workspace">
+        <section id="viewer-panel">
+          <div id="viewport"></div>
+          <div id="viewer-status" class="hidden" aria-live="polite"></div>
+          <div id="viewer-hud">
+            Renderer: WebGL / Three.js<br />
+            <span id="hud-frames">Frames: 0</span><br />
+            <span id="hud-camera">Camera: Orbit</span>
+          </div>
+          <div id="empty-state">
+            <div>
+              <strong id="empty-state-title">STEP 파일이 없습니다</strong>
+              <span id="empty-state-body">STEP 파일을 로드하거나 이 영역으로 드래그하세요</span><br />
+              <span id="empty-state-pipeline" style="opacity:0.75">파싱 — · 경로 계산 — · 충돌 —</span>
+            </div>
+          </div>
+          <div id="playback-bar">
+            <div class="playback-controls">
+              <button id="play-button" class="btn btn-icon" type="button" title="Play">▶</button>
+              <button id="pause-button" class="btn btn-icon" type="button" title="Pause">⏸</button>
+              <button id="stop-button" class="btn btn-icon" type="button" title="Stop">■</button>
+              <button id="reset-view-button" class="btn btn-icon" type="button" title="Reset view">⟲</button>
+            </div>
+            <div class="playback-track">
+              <input id="timeline-slider" type="range" min="0" max="0" value="0" step="any" />
+              <div class="playback-meta">
+                <span id="playback-status">대기</span>
+                <span id="frame-label">Frame 0 / 0</span>
+              </div>
+            </div>
+            <div id="time-label" class="playback-time">0:00 / 0:00</div>
+          </div>
+        </section>
+
+        <aside id="sidebar">
+          <section class="sidebar-section">
+            <div class="sidebar-header">
+              <div class="sidebar-header-title">
+                <h2>조립 트리</h2>
+                <!-- [디버그 모드][나중에 삭제] 기대 mesh 대비 누락 -->
+                <span id="debug-missing-chip" class="debug-missing-chip hidden">
+                  누락 <strong id="debug-missing-count">0</strong>
+                </span>
+              </div>
+              <span id="tree-count" style="color: var(--text-muted); font-size: 12px; font-family: var(--font-mono);">0 parts</span>
+            </div>
+            <ul id="part-tree"></ul>
+          </section>
+        </aside>
+      </div>
+    </div>
+
+    <div id="drop-overlay">Drop STEP file to process</div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

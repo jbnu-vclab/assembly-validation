@@ -5,12 +5,15 @@ channels:
 dependencies:
   - python=3.12
   - pythonocc-core=7.9.3
+  - nodejs=22
   - pip:
     - numpy
     - tqdm
     - trimesh[recommend]
     - scipy
-    - pyvista
     - msgpack
     - hydra-core
+    - fastapi
+    - "uvicorn[standard]"
+    - python-multipart
     - git+https://github.com/AutodeskAILab/occwl.git

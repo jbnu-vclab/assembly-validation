@@ -1,0 +1,210 @@
+/*
+ * [디버그 모드][나중에 삭제]
+ * 모드 토글 / Load Assembly 액션 레이아웃 + Debug 밝은 테마.
+ * 토글·Export 위치 고정을 위해 중간 슬롯 너비를 예약한다.
+ * 디버그 모드 제거 시 이 파일 전체를 삭제한다.
+ */
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  flex-shrink: 0;
+}
+
+.mode-toggle-button {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.mode-toggle-button.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.header-action-slot {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  justify-items: start;
+  min-width: 248px;
+  min-height: 36px;
+}
+
+.header-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  grid-area: 1 / 1;
+}
+
+.header-action-group.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.debug-load-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.debug-assembly-picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 100%;
+  padding: 4px;
+  border: 1px solid rgba(90, 162, 255, 0.45);
+  border-radius: 10px;
+  background: #2d3c55;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.debug-assembly-picker.hidden {
+  display: none;
+}
+
+.debug-assembly-option {
+  border: none;
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: transparent;
+  color: #f5f8ff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.debug-assembly-option:hover {
+  background: rgba(90, 162, 255, 0.18);
+}
+
+#load-assembly-button.is-picker-open {
+  outline: 1px solid rgba(90, 162, 255, 0.55);
+}
+
+.sidebar-header-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.debug-missing-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 200, 87, 0.55);
+  border-radius: 999px;
+  background: rgba(255, 200, 87, 0.14);
+  color: #ffd98a;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.debug-missing-chip.hidden {
+  display: none;
+}
+
+.debug-missing-chip strong {
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.debug-bug {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: rgba(110, 207, 122, 0.12);
+  border: 1px solid rgba(110, 207, 122, 0.35);
+  animation: debug-bug-wiggle 2.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.debug-bug svg {
+  display: block;
+}
+
+@keyframes debug-bug-wiggle {
+  0%,
+  100% {
+    transform: rotate(-6deg) translateY(0);
+  }
+  50% {
+    transform: rotate(6deg) translateY(-1px);
+  }
+}
+
+/* [디버그 모드][나중에 삭제] 밝은 테마 */
+body.debug-mode {
+  --bg-app: #1a2333;
+  --bg-panel: #243044;
+  --bg-panel-elevated: #2d3c55;
+  --bg-hover: #3a4d6b;
+  --border: #4a5f80;
+  --text: #f5f8ff;
+  --text-muted: #c2d0e6;
+  --accent: #5aa2ff;
+  --accent-strong: #3d8bfd;
+  --success: #55e0a4;
+  --danger: #ff7b8c;
+  --warning: #ffc857;
+}
+
+body.debug-mode #app-header {
+  background: linear-gradient(180deg, #2a3a52 0%, #1f2b40 100%);
+}
+
+body.debug-mode #viewer-panel {
+  background: #1e2a3d;
+}
+
+body.debug-mode #viewer-status {
+  background: rgba(36, 48, 68, 0.88);
+  border-color: rgba(90, 162, 255, 0.45);
+  color: #f5f8ff;
+}
+
+body.debug-mode #viewer-hud {
+  background: rgba(36, 48, 68, 0.88);
+  border-color: rgba(90, 162, 255, 0.35);
+  color: #d5e2f5;
+}
+
+body.debug-mode #playback-bar {
+  background: rgba(36, 48, 68, 0.92);
+}
+
+body.debug-mode #sidebar {
+  background: #223146;
+}
+
+body.debug-mode .mode-toggle {
+  border-color: rgba(90, 162, 255, 0.45);
+  background: rgba(45, 60, 85, 0.9);
+}

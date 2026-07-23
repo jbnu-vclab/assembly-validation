@@ -205,3 +205,16 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local-only data folders (keep directory via .gitkeep; contents stay local)
+step/*
+!step/.gitkeep
+part_cache/*
+!part_cache/.gitkeep
+output/*
+!output/.gitkeep
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/public/*.msgpack
