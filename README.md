@@ -3,6 +3,23 @@
 ```
 conda env create -f environment.yml
 ```
+
+## Run
+터미널 2개를 띄운 뒤 각각 실행합니다. (서버 먼저)
+
+**서버**
+```
+conda activate assembly-validation
+uvicorn server.app.main:app --reload --port 8001
+```
+
+**프론트엔드**
+```
+conda activate assembly-validation
+cd frontend
+npm run dev
+```
+
 ## Code Structure
 ```
 ├── config/
