@@ -1,7 +1,7 @@
 /*
  * [디버그 모드][나중에 삭제]
- * 모드 토글 / Load Assembly 액션 레이아웃 + Debug 밝은 테마.
- * 토글·Export 위치 고정을 위해 중간 슬롯 너비를 예약한다.
+ * 모드 토글 / Load Assembly(사이드바) / Debug 테마.
+ * 요약 칩·헤더 액션은 자리만 유지해 모드 토글 위치를 고정한다.
  * 디버그 모드 제거 시 이 파일 전체를 삭제한다.
  */
 
@@ -55,6 +55,21 @@
   pointer-events: none;
 }
 
+/* [디버그 모드][나중에 삭제] 조립 트리 위 Load Assembly */
+.debug-sidebar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.debug-sidebar-actions.hidden {
+  display: none;
+}
+
 .debug-load-wrap {
   position: relative;
   display: inline-flex;
@@ -65,11 +80,12 @@
 .debug-assembly-picker {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 40;
   display: flex;
   flex-direction: column;
-  min-width: 100%;
+  min-width: max(100%, 140px);
   padding: 4px;
   border: 1px solid rgba(90, 162, 255, 0.45);
   border-radius: 10px;
@@ -207,4 +223,17 @@ body.debug-mode #sidebar {
 body.debug-mode .mode-toggle {
   border-color: rgba(90, 162, 255, 0.45);
   background: rgba(45, 60, 85, 0.9);
+}
+
+/* [디버그 모드][나중에 삭제] 공간은 유지해 모드 토글 위치 고정 */
+body.debug-mode .summary-chip.is-ok,
+body.debug-mode .summary-chip.is-collision {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* [디버그 모드][나중에 삭제] Export / 헤더 액션 숨김(자리 유지로 토글 위치 고정) */
+body.debug-mode .header-actions {
+  visibility: hidden;
+  pointer-events: none;
 }

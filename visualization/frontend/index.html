@@ -45,54 +45,6 @@
               <button id="open-button" class="btn" type="button">Load STEP</button>
               <button id="assemble-button" class="btn btn-primary" type="button" disabled>조립 계산</button>
             </div>
-
-            <div id="debug-actions" class="header-action-group hidden">
-              <!-- [디버그 모드][나중에 삭제] -->
-              <div class="debug-load-wrap">
-                <button id="load-assembly-button" class="btn btn-primary" type="button">Load Assembly</button>
-                <div id="debug-assembly-picker" class="debug-assembly-picker hidden" role="menu" aria-label="Assembly target">
-                  <button
-                    id="load-cleaner-assembly-button"
-                    class="debug-assembly-option"
-                    type="button"
-                    role="menuitem"
-                    title="기대 mesh 15"
-                  >
-                    Cleaner
-                  </button>
-                  <button
-                    id="load-hair-dryer-assembly-button"
-                    class="debug-assembly-option"
-                    type="button"
-                    role="menuitem"
-                    title="기대 mesh 16"
-                  >
-                    Hair Dryer
-                  </button>
-                </div>
-              </div>
-              <span class="debug-bug" title="Debug Mode" aria-hidden="true">
-                <svg viewBox="0 0 64 64" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
-                  <ellipse cx="32" cy="36" rx="16" ry="18" fill="#6ecf7a"/>
-                  <ellipse cx="32" cy="36" rx="16" ry="18" fill="none" stroke="#2f6b3a" stroke-width="2"/>
-                  <path d="M32 18v36" stroke="#2f6b3a" stroke-width="2"/>
-                  <circle cx="24" cy="30" r="2.2" fill="#1b4332"/>
-                  <circle cx="40" cy="30" r="2.2" fill="#1b4332"/>
-                  <circle cx="24" cy="40" r="2.2" fill="#1b4332"/>
-                  <circle cx="40" cy="40" r="2.2" fill="#1b4332"/>
-                  <circle cx="32" cy="14" r="7" fill="#8be09a" stroke="#2f6b3a" stroke-width="2"/>
-                  <circle cx="29" cy="13" r="1.4" fill="#1b4332"/>
-                  <circle cx="35" cy="13" r="1.4" fill="#1b4332"/>
-                  <path d="M26 8c-4-4-9-3-10-1" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M38 8c4-4 9-3 10-1" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M18 28c-5-2-8 1-9 4" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M46 28c5-2 8 1 9 4" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M17 42c-5 1-7 5-7 8" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M47 42c5 1 7 5 7 8" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-              </span>
-              <input id="assembly-file-input" type="file" accept=".msgpack,application/octet-stream" hidden />
-            </div>
           </div>
 
           <button id="export-button" class="btn" type="button">Export Report</button>
@@ -135,6 +87,54 @@
         </section>
 
         <aside id="sidebar">
+          <!-- [디버그 모드][나중에 삭제] Load Assembly: 조립 트리 위 중앙 -->
+          <div id="debug-actions" class="debug-sidebar-actions hidden">
+            <div class="debug-load-wrap">
+              <button id="load-assembly-button" class="btn btn-primary" type="button">Load Assembly</button>
+              <div id="debug-assembly-picker" class="debug-assembly-picker hidden" role="menu" aria-label="Assembly target">
+                <button
+                  id="load-cleaner-assembly-button"
+                  class="debug-assembly-option"
+                  type="button"
+                  role="menuitem"
+                  title="기대 mesh 15"
+                >
+                  Cleaner
+                </button>
+                <button
+                  id="load-hair-dryer-assembly-button"
+                  class="debug-assembly-option"
+                  type="button"
+                  role="menuitem"
+                  title="기대 mesh 16"
+                >
+                  Hair Dryer
+                </button>
+              </div>
+            </div>
+            <span class="debug-bug" title="Debug Mode" aria-hidden="true">
+              <svg viewBox="0 0 64 64" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
+                <ellipse cx="32" cy="36" rx="16" ry="18" fill="#6ecf7a"/>
+                <ellipse cx="32" cy="36" rx="16" ry="18" fill="none" stroke="#2f6b3a" stroke-width="2"/>
+                <path d="M32 18v36" stroke="#2f6b3a" stroke-width="2"/>
+                <circle cx="24" cy="30" r="2.2" fill="#1b4332"/>
+                <circle cx="40" cy="30" r="2.2" fill="#1b4332"/>
+                <circle cx="24" cy="40" r="2.2" fill="#1b4332"/>
+                <circle cx="40" cy="40" r="2.2" fill="#1b4332"/>
+                <circle cx="32" cy="14" r="7" fill="#8be09a" stroke="#2f6b3a" stroke-width="2"/>
+                <circle cx="29" cy="13" r="1.4" fill="#1b4332"/>
+                <circle cx="35" cy="13" r="1.4" fill="#1b4332"/>
+                <path d="M26 8c-4-4-9-3-10-1" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                <path d="M38 8c4-4 9-3 10-1" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                <path d="M18 28c-5-2-8 1-9 4" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                <path d="M46 28c5-2 8 1 9 4" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                <path d="M17 42c-5 1-7 5-7 8" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+                <path d="M47 42c5 1 7 5 7 8" fill="none" stroke="#2f6b3a" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <input id="assembly-file-input" type="file" accept=".msgpack,application/octet-stream" hidden />
+          </div>
+
           <section class="sidebar-section">
             <div class="sidebar-header">
               <div class="sidebar-header-title">
