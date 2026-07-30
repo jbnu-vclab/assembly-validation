@@ -215,6 +215,6 @@ output/*
 !output/.gitkeep
 
 # Node / frontend
-frontend/node_modules/
-frontend/dist/
-frontend/public/*.msgpack
+visualization/frontend/node_modules/
+visualization/frontend/dist/
+visualization/frontend/public/*.msgpack

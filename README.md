@@ -10,13 +10,14 @@ conda env create -f environment.yml
 **서버**
 ```
 conda activate assembly-validation
+cd visualization
 uvicorn server.app.main:app --reload --port 8001
 ```
 
 **프론트엔드**
 ```
 conda activate assembly-validation
-cd frontend
+cd visualization/frontend
 npm run dev
 ```
 
@@ -36,24 +37,25 @@ npm run dev
 ├── step/ : input CAD STEP files 
 ├── part_cache/ : cached STEP parse meshes 
 ├── output/ : assembly result msgpack 
-├── server/
-│   ├── requirements.txt
-│   └── app/
-│       ├── main.py : FastAPI entry
-│       └── api/
-│           └── routes.py : /api/load-step (STEP→mesh), /api/assemble (dummy output/*.msgpack)
-├── frontend/
-│   ├── index.html : Three.js dashboard
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── public/
-│   └── src/
-│       ├── main.js : Load STEP / playback / part tree
-│       ├── loader.js : STEP upload + msgpack decode
-│       ├── renderer.js : Three.js scene and trajectory playback
-│       ├── styles.css
-│       ├── debug_mode.js : [debug] Service/Debug toggle + Load Assembly
-│       └── debug_style.css : [debug] debug theme / layout
+├── visualization/
+│   ├── server/
+│   │   ├── requirements.txt
+│   │   └── app/
+│   │       ├── main.py : FastAPI entry
+│   │       └── api/
+│   │           └── routes.py : /api/load-step (STEP→mesh), /api/assemble (dummy output/*.msgpack)
+│   └── frontend/
+│       ├── index.html : Three.js dashboard
+│       ├── package.json
+│       ├── vite.config.js
+│       ├── public/
+│       └── src/
+│           ├── main.js : Load STEP / playback / part tree
+│           ├── loader.js : STEP upload + msgpack decode
+│           ├── renderer.js : Three.js scene and trajectory playback
+│           ├── styles.css
+│           ├── debug_mode.js : [debug] Service/Debug toggle + Load Assembly
+│           └── debug_style.css : [debug] debug theme / layout
 ├── environment.yml
 └── main.py
 ```
