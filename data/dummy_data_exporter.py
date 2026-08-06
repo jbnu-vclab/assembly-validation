@@ -43,18 +43,34 @@ class DummyDataExporter:
 
     def _build_payload_from_sequence(self) -> dict[str, object]:
         raw_payload = _load_sequence_payload(self._sequence_path)
-        solids = _get_indexed_entries_as_list(raw_payload.get("solids"), "solids")
-        trajectories = _get_indexed_entries_as_list(
+        solid_entries_with_keys = _get_indexed_entries_with_keys(
+            raw_payload.get("solids"),
+            "solids",
+        )
+        trajectory_entries_with_keys = _get_indexed_entries_with_keys(
             raw_payload.get("trajectories"),
             "trajectories",
         )
+        trajectories = [entry for _, entry in trajectory_entries_with_keys]
         metadata_entry = raw_payload.get("metadata")
         if not isinstance(metadata_entry, dict):
             raise DummyExportException("sequence metadata must be an object")
 
         global_bbox = _get_flat_global_bbox(metadata_entry.get("global_bbox"))
-        solids = _get_solids_with_derived_initial_states(solids, trajectories)
+        solids = _get_solids_with_derived_initial_states(
+            solid_entries_with_keys,
+            trajectories,
+        )
         global_bbox = _expand_bbox_with_solid_states(global_bbox, solids)
+        part_index_to_dense_index = {
+            solid_entry["part_index"]: dense_index
+            for dense_index, solid_entry in enumerate(solids)
+            if isinstance(solid_entry.get("part_index"), int)
+        }
+        remapped_trajectories = _remap_trajectory_solid_indexes(
+            trajectories,
+            part_index_to_dense_index,
+        )
 
         return {
             "metadata": {
@@ -62,7 +78,7 @@ class DummyDataExporter:
                 "global_bbox": global_bbox,
             },
             "solids": solids,
-            "trajectories": trajectories,
+            "trajectories": remapped_trajectories,
         }
 
 
@@ -117,12 +133,13 @@ def _load_sequence_payload(sequence_path: str) -> dict[object, object]:
     return payload
 
 
-def _get_indexed_entries_as_list(
+def _get_indexed_entries_with_keys(
     indexed_entries: object,
     field_name: str,
-) -> list[object]:
+) -> list[tuple[int, object]]:
+    """list 또는 int-key map을 (part_index, entry) 목록으로 변환한다. 키를 보존한다."""
     if isinstance(indexed_entries, list):
-        return indexed_entries
+        return [(index, entry) for index, entry in enumerate(indexed_entries)]
 
     if not isinstance(indexed_entries, dict):
         raise DummyExportException(
@@ -140,14 +157,95 @@ def _get_indexed_entries_as_list(
             f"{field_name} keys must be integers"
         ) from error
 
-    expected_keys = list(range(len(sorted_keys)))
-    if [int(key) for key in sorted_keys] != expected_keys:
-        raise DummyExportException(
-            f"{field_name} keys must be contiguous integers starting at 0, "
-            f"received {sorted_keys}"
+    indexed_entries_with_keys: list[tuple[int, object]] = []
+    for key in sorted_keys:
+        part_index = int(key)
+        if part_index < 0:
+            raise DummyExportException(
+                f"{field_name} keys must be non-negative integers, received {key!r}"
+            )
+        indexed_entries_with_keys.append((part_index, indexed_entries[key]))
+    return indexed_entries_with_keys
+
+
+def _remap_trajectory_solid_indexes(
+    trajectories: list[object],
+    part_index_to_dense_index: dict[int, int],
+) -> list[object]:
+    remapped_trajectories: list[object] = []
+    for frame_index, trajectory_frame in enumerate(trajectories):
+        if not isinstance(trajectory_frame, dict):
+            raise DummyExportException(
+                f"trajectories[{frame_index}] must be an object"
+            )
+        part_index = trajectory_frame.get("solid")
+        if not isinstance(part_index, int):
+            raise DummyExportException(
+                f"trajectories[{frame_index}].solid must be an integer"
+            )
+        if part_index not in part_index_to_dense_index:
+            raise DummyExportException(
+                f"trajectories[{frame_index}].solid={part_index} is missing from solids"
+            )
+        remapped_frame = dict(trajectory_frame)
+        remapped_frame["solid"] = part_index_to_dense_index[part_index]
+        remapped_trajectories.append(remapped_frame)
+    return remapped_trajectories
+
+
+def _get_solids_with_derived_initial_states(
+    solid_entries_with_keys: list[tuple[int, object]],
+    trajectories: list[object],
+) -> list[dict[str, object]]:
+    """
+    시퀀스 파일의 solids.state 는 조립 완료 자세(원점)인 경우가 많다.
+    프론트는 solids.state → trajectories[].state 로 보간하므로,
+    각 solid의 첫 trajectory action 을 역산해 분해 시작 자세를 넣는다.
+    part_index(파서/캐시 인덱스)를 각 solid에 보존한다.
+    """
+    first_trajectory_by_part_index: dict[int, dict[str, object]] = {}
+    for trajectory_frame in trajectories:
+        if not isinstance(trajectory_frame, dict):
+            raise DummyExportException("trajectory frame must be an object")
+        part_index = trajectory_frame.get("solid")
+        if not isinstance(part_index, int):
+            raise DummyExportException("trajectory solid must be an integer")
+        if part_index not in first_trajectory_by_part_index:
+            first_trajectory_by_part_index[part_index] = trajectory_frame
+
+    normalized_solids: list[dict[str, object]] = []
+    for part_index, solid_entry in solid_entries_with_keys:
+        if not isinstance(solid_entry, dict):
+            raise DummyExportException(f"solids[{part_index}] must be an object")
+
+        mesh_entry = solid_entry.get("mesh")
+        state_entry = solid_entry.get("state")
+        if not isinstance(mesh_entry, dict) or not isinstance(state_entry, dict):
+            raise DummyExportException(
+                f"solids[{part_index}] must contain mesh and state objects"
+            )
+
+        initial_state = _get_validated_state(state_entry, f"solids[{part_index}].state")
+        first_trajectory = first_trajectory_by_part_index.get(part_index)
+        if first_trajectory is not None:
+            initial_state = _get_state_before_action(
+                end_state=_get_validated_state(
+                    first_trajectory.get("state"),
+                    f"trajectories[solid={part_index}].state",
+                ),
+                action_entry=first_trajectory.get("action"),
+                field_name=f"trajectories[solid={part_index}].action",
+            )
+
+        normalized_solids.append(
+            {
+                "mesh": mesh_entry,
+                "state": initial_state,
+                "part_index": part_index,
+            }
         )
 
-    return [indexed_entries[key] for key in sorted_keys]
+    return normalized_solids
 
 
 def _get_flat_global_bbox(global_bbox_entry: object) -> list[float]:
@@ -182,59 +280,6 @@ def _get_flat_global_bbox(global_bbox_entry: object) -> list[float]:
         float(maximum_corner[1]),
         float(maximum_corner[2]),
     ]
-
-
-def _get_solids_with_derived_initial_states(
-    solids: list[object],
-    trajectories: list[object],
-) -> list[dict[str, object]]:
-    """
-    시퀀스 파일의 solids.state 는 조립 완료 자세(원점)인 경우가 많다.
-    프론트는 solids.state → trajectories[].state 로 보간하므로,
-    각 solid의 첫 trajectory action 을 역산해 분해 시작 자세를 넣는다.
-    """
-    first_trajectory_by_solid: dict[int, dict[str, object]] = {}
-    for trajectory_frame in trajectories:
-        if not isinstance(trajectory_frame, dict):
-            raise DummyExportException("trajectory frame must be an object")
-        solid_index = trajectory_frame.get("solid")
-        if not isinstance(solid_index, int):
-            raise DummyExportException("trajectory solid must be an integer")
-        if solid_index not in first_trajectory_by_solid:
-            first_trajectory_by_solid[solid_index] = trajectory_frame
-
-    normalized_solids: list[dict[str, object]] = []
-    for solid_index, solid_entry in enumerate(solids):
-        if not isinstance(solid_entry, dict):
-            raise DummyExportException(f"solids[{solid_index}] must be an object")
-
-        mesh_entry = solid_entry.get("mesh")
-        state_entry = solid_entry.get("state")
-        if not isinstance(mesh_entry, dict) or not isinstance(state_entry, dict):
-            raise DummyExportException(
-                f"solids[{solid_index}] must contain mesh and state objects"
-            )
-
-        initial_state = _get_validated_state(state_entry, f"solids[{solid_index}].state")
-        first_trajectory = first_trajectory_by_solid.get(solid_index)
-        if first_trajectory is not None:
-            initial_state = _get_state_before_action(
-                end_state=_get_validated_state(
-                    first_trajectory.get("state"),
-                    f"trajectories[solid={solid_index}].state",
-                ),
-                action_entry=first_trajectory.get("action"),
-                field_name=f"trajectories[solid={solid_index}].action",
-            )
-
-        normalized_solids.append(
-            {
-                "mesh": mesh_entry,
-                "state": initial_state,
-            }
-        )
-
-    return normalized_solids
 
 
 def _get_validated_state(

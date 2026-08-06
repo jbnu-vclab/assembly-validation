@@ -65,10 +65,22 @@ function getValidatedState(state_entry, field_name) {
   };
 }
 
+function getValidatedPartIndex(part_index_entry, solid_index) {
+  if (part_index_entry === undefined) {
+    return solid_index;
+  }
+  if (!Number.isInteger(part_index_entry) || part_index_entry < 0) {
+    throw new ResultLoadException(
+      `solids[${solid_index}].part_index must be a non-negative integer`,
+    );
+  }
+  return part_index_entry;
+}
+
 function getValidatedSolid(solid_entry, solid_index) {
   checkIsPlainObject(solid_entry, `solids[${solid_index}]`);
 
-  const { mesh, state } = solid_entry;
+  const { mesh, state, part_index: part_index_entry } = solid_entry;
   checkIsPlainObject(mesh, `solids[${solid_index}].mesh`);
   checkIsArray(mesh.vertices, `solids[${solid_index}].mesh.vertices`);
   checkIsArray(mesh.faces, `solids[${solid_index}].mesh.faces`);
@@ -79,6 +91,7 @@ function getValidatedSolid(solid_entry, solid_index) {
       faces: mesh.faces,
     },
     state: getValidatedState(state, `solids[${solid_index}].state`),
+    part_index: getValidatedPartIndex(part_index_entry, solid_index),
   };
 }
 

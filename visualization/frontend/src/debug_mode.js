@@ -2,8 +2,7 @@
  * [디버그 모드][나중에 삭제]
  * 알고리즘 시각화용 디버그 모드.
  * Service Mode ↔ Debug Mode 토글과 Load Assembly 흐름만 담당한다.
- * Load Assembly → Cleaner(15) / Hair Dryer(16) 선택 후 msgpack 로드,
- * mesh 누락 개수는 조립 트리 옆에 표시한다.
+ * Load Assembly → Cleaner / Hair Dryer 선택 후 msgpack 로드.
  * 디버그 모드 제거 시 이 파일 전체를 삭제한다.
  */
 
@@ -13,17 +12,15 @@ import { decodeAssemblyResult, ResultLoadException } from "./loader.js";
 // [디버그 모드][나중에 삭제]
 const ALLOWED_ASSEMBLY_SUFFIXES = [".msgpack"];
 
-// [디버그 모드][나중에 삭제] part_cache 기준 기대 solid 수
+// [디버그 모드][나중에 삭제]
 const DEBUG_ASSEMBLY_TARGETS = {
   cleaner: {
     button_id: "load-cleaner-assembly-button",
     label: "Cleaner",
-    expected_solid_count: 15,
   },
   hair_dryer: {
     button_id: "load-hair-dryer-assembly-button",
     label: "Hair Dryer",
-    expected_solid_count: 16,
   },
 };
 
@@ -49,10 +46,14 @@ function checkIsAssemblyFile(file) {
   }
 }
 
-function getIndexedEntriesAsList(indexed_entries, field_name) {
+function getIndexedEntriesWithKeys(indexed_entries, field_name) {
   // [디버그 모드][나중에 삭제]
+  // msgpack int-key map / list 모두 지원. 키(=파서 part_index)를 보존한다.
   if (Array.isArray(indexed_entries)) {
-    return indexed_entries;
+    return indexed_entries.map((entry, index) => ({
+      key: index,
+      entry,
+    }));
   }
   if (indexed_entries === null || typeof indexed_entries !== "object") {
     throw new ResultLoadException(`${field_name} must be a list or int-keyed object`);
@@ -61,13 +62,18 @@ function getIndexedEntriesAsList(indexed_entries, field_name) {
   const sorted_keys = Object.keys(indexed_entries).sort(
     (left_key, right_key) => Number(left_key) - Number(right_key),
   );
-  const expected_keys = sorted_keys.map((_, index) => String(index));
-  if (sorted_keys.join(",") !== expected_keys.join(",")) {
-    throw new ResultLoadException(
-      `${field_name} keys must be contiguous integers starting at 0`,
-    );
-  }
-  return sorted_keys.map((key) => indexed_entries[key]);
+  return sorted_keys.map((key) => {
+    const part_index = Number(key);
+    if (!Number.isInteger(part_index) || part_index < 0) {
+      throw new ResultLoadException(
+        `${field_name} keys must be non-negative integers, received ${key}`,
+      );
+    }
+    return {
+      key: part_index,
+      entry: indexed_entries[key],
+    };
+  });
 }
 
 function getFlatGlobalBbox(global_bbox_entry) {
@@ -161,48 +167,49 @@ function getStateBeforeAction(end_state, action_entry, field_name) {
   };
 }
 
-function getSolidsWithDerivedInitialStates(solids, trajectories) {
+function getSolidsWithDerivedInitialStates(solid_entries_with_keys, trajectories) {
   // [디버그 모드][나중에 삭제]
-  const first_trajectory_by_solid = new Map();
+  const first_trajectory_by_part_index = new Map();
   trajectories.forEach((trajectory_frame) => {
     if (trajectory_frame === null || typeof trajectory_frame !== "object") {
       throw new ResultLoadException("trajectory frame must be an object");
     }
-    const solid_index = trajectory_frame.solid;
-    if (!Number.isInteger(solid_index)) {
+    const part_index = trajectory_frame.solid;
+    if (!Number.isInteger(part_index)) {
       throw new ResultLoadException("trajectory solid must be an integer");
     }
-    if (!first_trajectory_by_solid.has(solid_index)) {
-      first_trajectory_by_solid.set(solid_index, trajectory_frame);
+    if (!first_trajectory_by_part_index.has(part_index)) {
+      first_trajectory_by_part_index.set(part_index, trajectory_frame);
     }
   });
 
-  return solids.map((solid_entry, solid_index) => {
+  return solid_entries_with_keys.map(({ key: part_index, entry: solid_entry }) => {
     if (solid_entry === null || typeof solid_entry !== "object") {
-      throw new ResultLoadException(`solids[${solid_index}] must be an object`);
+      throw new ResultLoadException(`solids[${part_index}] must be an object`);
     }
     const mesh_entry = solid_entry.mesh;
     const state_entry = solid_entry.state;
     if (mesh_entry === null || typeof mesh_entry !== "object") {
-      throw new ResultLoadException(`solids[${solid_index}].mesh must be an object`);
+      throw new ResultLoadException(`solids[${part_index}].mesh must be an object`);
     }
 
-    let initial_state = getValidatedState(state_entry, `solids[${solid_index}].state`);
-    const first_trajectory = first_trajectory_by_solid.get(solid_index);
+    let initial_state = getValidatedState(state_entry, `solids[${part_index}].state`);
+    const first_trajectory = first_trajectory_by_part_index.get(part_index);
     if (first_trajectory !== undefined) {
       initial_state = getStateBeforeAction(
         getValidatedState(
           first_trajectory.state,
-          `trajectories[solid=${solid_index}].state`,
+          `trajectories[solid=${part_index}].state`,
         ),
         first_trajectory.action,
-        `trajectories[solid=${solid_index}].action`,
+        `trajectories[solid=${part_index}].action`,
       );
     }
 
     return {
       mesh: mesh_entry,
       state: initial_state,
+      part_index,
     };
   });
 }
@@ -230,6 +237,31 @@ function expandBboxWithSolidStates(global_bbox, solids) {
   return expanded_bbox;
 }
 
+function remapTrajectorySolidIndexes(trajectories, part_index_to_dense_index) {
+  // [디버그 모드][나중에 삭제]
+  // 렌더러는 dense array index를 쓰므로, 파서 part_index → dense index로 재매핑한다.
+  return trajectories.map((trajectory_frame, frame_index) => {
+    if (trajectory_frame === null || typeof trajectory_frame !== "object") {
+      throw new ResultLoadException(`trajectories[${frame_index}] must be an object`);
+    }
+    const part_index = trajectory_frame.solid;
+    if (!Number.isInteger(part_index)) {
+      throw new ResultLoadException(
+        `trajectories[${frame_index}].solid must be an integer`,
+      );
+    }
+    if (!part_index_to_dense_index.has(part_index)) {
+      throw new ResultLoadException(
+        `trajectories[${frame_index}].solid=${part_index} is missing from solids`,
+      );
+    }
+    return {
+      ...trajectory_frame,
+      solid: part_index_to_dense_index.get(part_index),
+    };
+  });
+}
+
 function normalizeAssemblyPayload(raw_payload) {
   // [디버그 모드][나중에 삭제]
   if (raw_payload === null || typeof raw_payload !== "object" || Array.isArray(raw_payload)) {
@@ -241,11 +273,29 @@ function normalizeAssemblyPayload(raw_payload) {
     throw new ResultLoadException("metadata must be an object");
   }
 
-  const solids = getIndexedEntriesAsList(raw_payload.solids, "solids");
-  const trajectories = getIndexedEntriesAsList(raw_payload.trajectories, "trajectories");
+  const solid_entries_with_keys = getIndexedEntriesWithKeys(raw_payload.solids, "solids");
+  const trajectory_entries_with_keys = getIndexedEntriesWithKeys(
+    raw_payload.trajectories,
+    "trajectories",
+  );
+  const trajectories = trajectory_entries_with_keys.map(({ entry }) => entry);
   let global_bbox = getFlatGlobalBbox(metadata_entry.global_bbox);
-  const normalized_solids = getSolidsWithDerivedInitialStates(solids, trajectories);
+  const normalized_solids = getSolidsWithDerivedInitialStates(
+    solid_entries_with_keys,
+    trajectories,
+  );
   global_bbox = expandBboxWithSolidStates(global_bbox, normalized_solids);
+
+  const part_index_to_dense_index = new Map(
+    normalized_solids.map((solid_entry, dense_index) => [
+      solid_entry.part_index,
+      dense_index,
+    ]),
+  );
+  const remapped_trajectories = remapTrajectorySolidIndexes(
+    trajectories,
+    part_index_to_dense_index,
+  );
 
   const step_path =
     typeof metadata_entry.step_path === "string" && metadata_entry.step_path !== ""
@@ -258,7 +308,7 @@ function normalizeAssemblyPayload(raw_payload) {
       global_bbox,
     },
     solids: normalized_solids,
-    trajectories,
+    trajectories: remapped_trajectories,
   };
 }
 
@@ -299,8 +349,6 @@ export function initDebugMode(viewer_dashboard) {
   const assembly_picker = getRequiredElement("debug-assembly-picker");
   const service_actions = getRequiredElement("service-actions");
   const debug_actions = getRequiredElement("debug-actions");
-  const missing_chip = getRequiredElement("debug-missing-chip");
-  const missing_count_label = getRequiredElement("debug-missing-count");
 
   let is_debug_mode = false;
   let pending_assembly_target = null;
@@ -308,12 +356,6 @@ export function initDebugMode(viewer_dashboard) {
   function setAssemblyPickerOpen(is_open) {
     assembly_picker.classList.toggle("hidden", !is_open);
     load_assembly_button.classList.toggle("is-picker-open", is_open);
-  }
-
-  function setMissingCount(missing_count) {
-    const safe_count = Math.max(0, Number(missing_count) || 0);
-    missing_count_label.textContent = String(safe_count);
-    missing_chip.classList.toggle("hidden", safe_count <= 0);
   }
 
   function setDebugMode(next_is_debug_mode) {
@@ -330,7 +372,6 @@ export function initDebugMode(viewer_dashboard) {
     debug_actions.classList.toggle("hidden", !is_debug_mode);
     pending_assembly_target = null;
     setAssemblyPickerOpen(false);
-    setMissingCount(0);
 
     if (is_debug_mode) {
       viewer_dashboard.resetWorkspace("조립 결과 msgpack을 로드해 주세요");
@@ -342,7 +383,6 @@ export function initDebugMode(viewer_dashboard) {
   async function loadAssemblyFromFile(file, assembly_target) {
     checkIsAssemblyFile(file);
     const target_label = assembly_target?.label ?? "Assembly";
-    const expected_solid_count = assembly_target?.expected_solid_count ?? null;
     viewer_dashboard._setViewerStatus(
       `${target_label}: ${file.name} 디버그 로드 중…`,
       true,
@@ -354,13 +394,7 @@ export function initDebugMode(viewer_dashboard) {
         `debug-${target_label.toLowerCase().replaceAll(" ", "-")}`,
         true,
       );
-      if (expected_solid_count !== null) {
-        setMissingCount(expected_solid_count - assembly_result.solids.length);
-      } else {
-        setMissingCount(0);
-      }
     } catch (error) {
-      setMissingCount(0);
       viewer_dashboard.showError(error);
     }
   }
@@ -422,7 +456,7 @@ export function initDebugMode(viewer_dashboard) {
     }
   });
 
-  // [디버그 모드][나중에 삭제] debug 모드에서는 STEP 드롭 대신 assembly msgpack 드롭
+  // [디버그 모드][나중에 삭제] debug 모드에서는 assembly msgpack 드롭
   window.addEventListener(
     "drop",
     async (event) => {
@@ -437,7 +471,6 @@ export function initDebugMode(viewer_dashboard) {
       if (dropped_files === undefined || dropped_files.length === 0) {
         return;
       }
-      // 드롭은 대상 미지정 → 누락 비교 없이 로드
       await loadAssemblyFromFile(dropped_files[0], null);
     },
     true,

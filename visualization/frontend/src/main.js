@@ -31,6 +31,46 @@ function getMovingSolidIndexSet(trajectories) {
   return new Set(trajectories.map((trajectory_frame) => trajectory_frame.solid));
 }
 
+function formatPartLabel(part_index) {
+  return `part_${String(part_index).padStart(2, "0")}`;
+}
+
+function getSolidPartIndex(solid_entry, solid_index) {
+  if (Number.isInteger(solid_entry?.part_index)) {
+    return solid_entry.part_index;
+  }
+  return solid_index;
+}
+
+/** trajectories에 처음 등장하는 순서로 solid dense index를 정렬한다. */
+function getSolidIndexesInTrajectoryOrder(solids, trajectories) {
+  const ordered_solid_indexes = [];
+  const seen_solid_indexes = new Set();
+
+  for (const trajectory_frame of trajectories) {
+    const solid_index = trajectory_frame?.solid;
+    if (!Number.isInteger(solid_index)) {
+      continue;
+    }
+    if (solid_index < 0 || solid_index >= solids.length) {
+      continue;
+    }
+    if (seen_solid_indexes.has(solid_index)) {
+      continue;
+    }
+    seen_solid_indexes.add(solid_index);
+    ordered_solid_indexes.push(solid_index);
+  }
+
+  for (let solid_index = 0; solid_index < solids.length; solid_index += 1) {
+    if (!seen_solid_indexes.has(solid_index)) {
+      ordered_solid_indexes.push(solid_index);
+    }
+  }
+
+  return ordered_solid_indexes;
+}
+
 function checkIsStepFile(file) {
   const lowered_name = file.name.toLowerCase();
   const has_allowed_suffix = ALLOWED_STEP_SUFFIXES.some((suffix) =>
@@ -210,12 +250,21 @@ class ViewerDashboard {
 
   _renderPartTree(assembly_result) {
     const moving_solid_indexes = getMovingSolidIndexSet(assembly_result.trajectories);
+    const solid_indexes = this._has_assembly_plan
+      ? getSolidIndexesInTrajectoryOrder(
+          assembly_result.solids,
+          assembly_result.trajectories,
+        )
+      : assembly_result.solids.map((_, solid_index) => solid_index);
     this._part_tree.replaceChildren();
 
-    assembly_result.solids.forEach((solid_entry, solid_index) => {
+    solid_indexes.forEach((solid_index) => {
+      const solid_entry = assembly_result.solids[solid_index];
+      const part_index = getSolidPartIndex(solid_entry, solid_index);
       const list_item = document.createElement("li");
       list_item.className = "part-item";
       list_item.dataset.solidIndex = String(solid_index);
+      list_item.dataset.partIndex = String(part_index);
 
       const visibility_checkbox = document.createElement("input");
       visibility_checkbox.type = "checkbox";
@@ -237,24 +286,27 @@ class ViewerDashboard {
 
       const part_name = document.createElement("span");
       part_name.className = "part-name";
-      part_name.textContent = `part_${String(solid_index).padStart(2, "0")}`;
+      part_name.textContent = formatPartLabel(part_index);
+      part_name.title = formatPartLabel(part_index);
 
-      let action_element;
-      if (moving_solid_indexes.has(solid_index)) {
-        action_element = document.createElement("button");
-        action_element.type = "button";
-        action_element.className = "part-play-button";
-        action_element.title = "이 부품 구간 재생";
-        action_element.textContent = "▶";
-        action_element.addEventListener("click", (event) => {
-          event.stopPropagation();
-          this._playSolidTrajectory(solid_index);
-        });
-      } else {
-        action_element = document.createElement("span");
-        action_element.className = "part-path-error";
-        action_element.textContent = "빈 조립경로";
-        action_element.title = "빈 조립경로";
+      let action_element = null;
+      if (this._has_assembly_plan) {
+        if (moving_solid_indexes.has(solid_index)) {
+          action_element = document.createElement("button");
+          action_element.type = "button";
+          action_element.className = "part-play-button";
+          action_element.title = "이 부품 구간 재생";
+          action_element.textContent = "▶";
+          action_element.addEventListener("click", (event) => {
+            event.stopPropagation();
+            this._playSolidTrajectory(solid_index);
+          });
+        } else {
+          action_element = document.createElement("span");
+          action_element.className = "part-path-error";
+          action_element.textContent = "빈 조립경로";
+          action_element.title = "빈 조립경로";
+        }
       }
 
       const status_dot = document.createElement("span");
@@ -265,13 +317,11 @@ class ViewerDashboard {
         ? "trajectory 포함"
         : "정적 부품";
 
-      list_item.append(
-        visibility_checkbox,
-        color_swatch,
-        part_name,
-        action_element,
-        status_dot,
-      );
+      list_item.append(visibility_checkbox, color_swatch, part_name);
+      if (action_element !== null) {
+        list_item.append(action_element);
+      }
+      list_item.append(status_dot);
       list_item.addEventListener("click", () => {
         this._selectSolid(solid_index);
       });

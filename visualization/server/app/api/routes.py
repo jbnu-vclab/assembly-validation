@@ -44,7 +44,7 @@ def _get_mesh_global_bbox(meshes: list[Trimesh]) -> list[float]:
     ]
 
 
-def _serialize_mesh_entry(mesh: Trimesh) -> dict[str, object]:
+def _serialize_mesh_entry(mesh: Trimesh, part_index: int) -> dict[str, object]:
     return {
         "mesh": {
             "vertices": mesh.vertices.tolist(),
@@ -54,6 +54,7 @@ def _serialize_mesh_entry(mesh: Trimesh) -> dict[str, object]:
             "position": [0.0, 0.0, 0.0],
             "rotation": [0.0, 0.0, 0.0],
         },
+        "part_index": part_index,
     }
 
 
@@ -87,7 +88,10 @@ def _load_step_file(step_path: Path, step_display_path: str) -> bytes:
             "step_path": step_display_path,
             "global_bbox": _get_mesh_global_bbox(meshes),
         },
-        "solids": [_serialize_mesh_entry(mesh) for mesh in meshes],
+        "solids": [
+            _serialize_mesh_entry(mesh, part_index)
+            for part_index, mesh in enumerate(meshes)
+        ],
         "trajectories": [],
     }
     return msgpack.packb(payload, use_bin_type=True)

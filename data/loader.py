@@ -1,5 +1,5 @@
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from trimesh import Trimesh
 from occwl.compound import Compound
 from occwl.solid import Solid
@@ -27,12 +27,10 @@ class STEPLoader:
         return Trimesh(vertices = np.vstack(vertices), faces = np.vstack(faces))
 
     def load_all(self):
-        trimeshes = list()
         compound = Compound.load_from_step(self.filename)
+        solids = list(compound.solids())
 
         with ThreadPoolExecutor(max_workers = self.max_workers) as executor:
-            futures = [executor.submit(self.load, solid) for solid in compound.solids()]
-            for future in as_completed(futures):
-                trimeshes.append(future.result())
-
-        return trimeshes
+            # as_completed 대신 제출 순서를 유지해 part_index = compound.solids() 순번이 되게 한다.
+            futures = [executor.submit(self.load, solid) for solid in solids]
+            return [future.result() for future in futures]

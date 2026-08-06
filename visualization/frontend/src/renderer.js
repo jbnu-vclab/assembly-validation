@@ -22,6 +22,13 @@ const SOLID_COLORS = [
   0xeeca3b,
   0xb279a2,
   0xff9da6,
+  0x9d755d,
+  0xbab0ac,
+  0x17becf,
+  0xbcbd22,
+  0x9467bd,
+  0x8c564b,
+  0x7f7f7f,
 ];
 
 export class AssemblyRenderException extends Error {
@@ -216,12 +223,16 @@ export class AssemblyRenderer {
 
     solids.forEach((solid_entry, solid_index) => {
       const geometry = createSolidGeometry(solid_entry.mesh);
+      const part_index = Number.isInteger(solid_entry.part_index)
+        ? solid_entry.part_index
+        : solid_index;
       const material = new THREE.MeshStandardMaterial({
-        color: SOLID_COLORS[solid_index % SOLID_COLORS.length],
+        color: SOLID_COLORS[part_index % SOLID_COLORS.length],
         metalness: 0.08,
         roughness: 0.52,
       });
       const solid_mesh = new THREE.Mesh(geometry, material);
+      solid_mesh.userData.part_index = part_index;
       applyStateToObject(solid_mesh, solid_entry.state);
       this._scene.add(solid_mesh);
       this._solid_meshes.push(solid_mesh);
