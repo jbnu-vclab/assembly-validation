@@ -1,0 +1,117 @@
+/*
+ * [서비스 모드][나중에 삭제]
+ * 모드 토글 / Service 테마 / 헤더 Load STEP 슬롯.
+ * 기본(Debug) 화면의 요약 칩·Export 자리는 유지해 토글 위치를 고정한다.
+ * 서비스 모드 제거 시 이 파일 전체를 삭제한다.
+ */
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  flex-shrink: 0;
+}
+
+.mode-toggle-button {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.mode-toggle-button.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.header-action-slot {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  justify-items: start;
+  min-width: 248px;
+  min-height: 36px;
+}
+
+.header-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  grid-area: 1 / 1;
+}
+
+.header-action-group.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* [서비스 모드][나중에 삭제] 기본(Debug)에서는 요약·Export 자리만 유지 */
+body:not(.service-mode) .summary-chip.is-ok,
+body:not(.service-mode) .summary-chip.is-collision {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body:not(.service-mode) .header-actions {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* [서비스 모드][나중에 삭제] 서비스 활성 시 어두운 서비스 테마 */
+body.service-mode {
+  --bg-app: #0b0f16;
+  --bg-panel: #121826;
+  --bg-panel-elevated: #182033;
+  --bg-hover: #1e2a40;
+  --border: #2a3548;
+  --text: #e8eef8;
+  --text-muted: #93a0b8;
+  --accent: #3d8bfd;
+  --accent-strong: #2f6fe0;
+  --success: #3ecf8e;
+  --danger: #ff5c70;
+  --warning: #f0b429;
+}
+
+body.service-mode #app-header {
+  background: linear-gradient(180deg, #151c2b 0%, #101826 100%);
+}
+
+body.service-mode #viewer-panel {
+  background: #0d1320;
+}
+
+body.service-mode #viewer-status {
+  background: rgba(10, 14, 22, 0.78);
+  border-color: rgba(61, 139, 253, 0.28);
+  color: #e8eef8;
+}
+
+body.service-mode #viewer-hud {
+  background: rgba(10, 14, 22, 0.72);
+  border-color: rgba(61, 139, 253, 0.25);
+  color: #b7c6df;
+}
+
+body.service-mode #playback-bar {
+  background: rgba(14, 20, 32, 0.88);
+}
+
+body.service-mode #sidebar {
+  background: var(--bg-panel);
+}
+
+body.service-mode .mode-toggle {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}

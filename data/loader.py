@@ -12,7 +12,7 @@ import re
 from typing import Dict, List, Tuple
 
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from trimesh import Trimesh
 from occwl.compound import Compound
 
@@ -817,7 +817,7 @@ class STEPLoader:
         return distinguished
 
     def load_all(self):
-        """모든 몸체를 메쉬로 변환해 돌려준다(순서는 완료 순이라 실행마다 다르다).
+        """모든 몸체를 메쉬로 변환해 돌려준다.
 
         각 메쉬에 metadata['is_solid'] 와 metadata['name'] 을 단다.
 
@@ -834,20 +834,24 @@ class STEPLoader:
         두 읽기 경로의 기하 서명 불일치(마지막이 실질적 위험이며 multi-body PRODUCT 나
         배치 변환 차이에서 생긴다).
 
-        부품 번호는 완료 순서라 실행마다 달라지므로 사람이 읽거나 실행 간 대조할 때는
-        이름이나 형상 해시를 써야 한다.
+        반환 순서는 bodies() 제출 순서를 유지한다.
         """
         trimeshes = list()
         collected = self.bodies()
         sources = list(self.name_sources) or [None] * len(collected)
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {
-                executor.submit(self.load, body): (is_solid, name, sources[position])
+            # as_completed 대신 제출 순서를 유지해 part_index = bodies() 순번이 되게 한다.
+            future_entries = [
+                (
+                    executor.submit(self.load, body),
+                    is_solid,
+                    name,
+                    sources[position],
+                )
                 for position, (body, is_solid, name) in enumerate(collected)
-            }
-            for future in as_completed(futures):
+            ]
+            for future, is_solid, name, source in future_entries:
                 mesh = future.result()
-                is_solid, name, source = futures[future]
                 if mesh is None:
                     # 삼각분할이 아무 면도 내지 못한 몸체다. 조용히 버리면 부품 수가 줄어든
                     # 것을 아무도 모르므로 기록한다 — 호출자가 이 목록을 msgpack 에 남겨
