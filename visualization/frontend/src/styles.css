@@ -449,6 +449,31 @@ input {
   color: #dce7ff;
 }
 
+/* 실패 분석 버튼은 재생 버튼 칸과 conversion 칸을 합쳐 쓴다 —
+   실패한 부품에는 재생할 궤적이 없고, conversion("성공")은 메쉬 봉합 결과라
+   나란히 두면 "분해 성공"으로 오해된다. */
+.part-failure-button {
+  grid-column: span 2;
+  justify-self: end;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 123, 140, 0.45);
+  border-radius: 7px;
+  background: rgba(255, 123, 140, 0.12);
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.part-failure-button:hover {
+  background: rgba(255, 123, 140, 0.22);
+  border-color: rgba(255, 123, 140, 0.7);
+  color: #ffd9df;
+}
+
 .part-path-error {
   max-width: 108px;
   color: var(--danger);
@@ -477,6 +502,90 @@ input {
 }
 
 .part-conversion.is-missing {
+  color: var(--text-muted);
+}
+
+/* 실패 분석 리포트. 분석 중에는 뷰포트가 그 부품 하나에 쓰이므로 보고 있는 곳
+   바로 옆에 둔다. viewer-status 와 자리를 다투지 않도록 좌상단에 붙인다. */
+#failure-report {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 3;
+  width: 300px;
+  max-width: calc(100% - 40px);
+  border-radius: 12px;
+  background: rgba(28, 36, 52, 0.93);
+  border: 1px solid rgba(255, 123, 140, 0.35);
+  backdrop-filter: blur(8px);
+  color: #f5f8ff;
+  font-family: var(--font-ui);
+  overflow: hidden;
+}
+
+#failure-report.hidden {
+  display: none;
+}
+
+.failure-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 14px;
+  background: rgba(255, 123, 140, 0.1);
+  border-bottom: 1px solid rgba(255, 123, 140, 0.22);
+}
+
+.failure-part {
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-verdict {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--danger);
+}
+
+.failure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 14px 13px;
+}
+
+.failure-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.failure-row-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.failure-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.failure-obstacle-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffd9df;
+}
+
+.failure-note {
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--text-muted);
 }
 

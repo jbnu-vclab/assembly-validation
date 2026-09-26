@@ -172,10 +172,85 @@ function getValidatedTrajectoryFrame(trajectory_frame_entry, frame_index) {
   };
 }
 
+function getValidatedOverlap(overlap_entry, field_name) {
+  checkIsPlainObject(overlap_entry, field_name);
+
+  const { obstacle, is_over_limit, mesh } = overlap_entry;
+  if (!Number.isInteger(obstacle)) {
+    throw new ResultLoadException(`${field_name}.obstacle must be an integer`);
+  }
+  if (typeof is_over_limit !== "boolean") {
+    throw new ResultLoadException(`${field_name}.is_over_limit must be a boolean`);
+  }
+  checkIsPlainObject(mesh, `${field_name}.mesh`);
+  checkIsArray(mesh.vertices, `${field_name}.mesh.vertices`);
+  checkIsArray(mesh.faces, `${field_name}.mesh.faces`);
+
+  return {
+    obstacle,
+    is_over_limit,
+    // 월드 좌표다. 그리는 쪽에서 state 변환을 곱하면 안 된다.
+    mesh: { vertices: mesh.vertices, faces: mesh.faces },
+  };
+}
+
+function getValidatedFailurePose(pose_entry, field_name) {
+  // null 은 규약상 정상값이다(조립 상태부터 초과 / 막힘 자세를 찾지 못함).
+  if (pose_entry === null) {
+    return null;
+  }
+  checkIsPlainObject(pose_entry, field_name);
+  checkIsArray(pose_entry.overlaps, `${field_name}.overlaps`);
+
+  return {
+    state: getValidatedState(pose_entry.state, `${field_name}.state`),
+    overlaps: pose_entry.overlaps.map((overlap_entry, overlap_index) =>
+      getValidatedOverlap(overlap_entry, `${field_name}.overlaps[${overlap_index}]`),
+    ),
+  };
+}
+
+function getValidatedFailure(failure_entry, failure_index) {
+  const field_name = `failures[${failure_index}]`;
+  checkIsPlainObject(failure_entry, field_name);
+
+  const { solid: solid_index, closest_path } = failure_entry;
+  if (!Number.isInteger(solid_index)) {
+    throw new ResultLoadException(`${field_name}.solid must be an integer`);
+  }
+  checkIsArray(closest_path, `${field_name}.closest_path`);
+
+  return {
+    solid: solid_index,
+    // trajectories 와 같은 스텝 구조이므로 같은 검증기를 쓴다. 빈 배열이면 그 부품은
+    // 한 걸음도 움직이지 못한 것이다.
+    closest_path: closest_path.map((frame_entry, frame_index) =>
+      getValidatedTrajectoryFrame(frame_entry, `${field_name}.closest_path.${frame_index}`),
+    ),
+    last_valid_pose: getValidatedFailurePose(
+      failure_entry.last_valid_pose,
+      `${field_name}.last_valid_pose`,
+    ),
+    first_blocked_pose: getValidatedFailurePose(
+      failure_entry.first_blocked_pose,
+      `${field_name}.first_blocked_pose`,
+    ),
+  };
+}
+
+function getValidatedFailures(failures_entry) {
+  // 전부 성공한 결과에는 failures 가 없다. 없음과 빈 목록을 같게 다룬다.
+  if (failures_entry === undefined) {
+    return [];
+  }
+  checkIsArray(failures_entry, "failures");
+  return failures_entry.map(getValidatedFailure);
+}
+
 function getValidatedPayload(payload) {
   checkIsPlainObject(payload, "payload");
 
-  const { metadata, solids, trajectories } = payload;
+  const { metadata, solids, trajectories, failures } = payload;
   checkIsArray(solids, "solids");
   checkIsArray(trajectories, "trajectories");
 
@@ -183,6 +258,7 @@ function getValidatedPayload(payload) {
     metadata: getValidatedMetadata(metadata),
     solids: solids.map(getValidatedSolid),
     trajectories: trajectories.map(getValidatedTrajectoryFrame),
+    failures: getValidatedFailures(failures),
   };
 }
 

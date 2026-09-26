@@ -99,6 +99,113 @@ function getSolidIndexesInTrajectoryOrder(solids, trajectories) {
   return ordered_solid_indexes;
 }
 
+/** 실패 부품을 dense solid index 로 찾을 수 있게 색인한다. */
+function getFailureBySolidIndex(failures) {
+  return new Map((failures ?? []).map((failure_entry) => [failure_entry.solid, failure_entry]));
+}
+
+/**
+ * 실패 자세에서 상한을 넘긴 겹침만 골라낸다.
+ *
+ * 한 자세에 is_over_limit 이 참인 항목과 거짓인 항목이 섞여 들어온다. 거짓은 허용치
+ * 이내라 원인이 아니므로, 구분하지 않으면 원래 겹쳐 있던 부분까지 원인으로 지목하게
+ * 된다. 범인이 둘 이상인 자세도 실제로 있으므로 하나만 찾지 않는다.
+ */
+function getCulpritOverlaps(pose_entry) {
+  if (pose_entry === null) {
+    return [];
+  }
+  return pose_entry.overlaps.filter((overlap_entry) => overlap_entry.is_over_limit);
+}
+
+const AXIS_NAMES = ["X", "Y", "Z"];
+
+/**
+ * 부품이 빠져나가려던 축과 부호(예: "-Y").
+ *
+ * 방향은 추정하지 않고 first_blocked_pose 의 변위에서 읽는다. 부품 AABB 로 최단 이탈
+ * 축을 다시 고르면 대칭 부품에서 ±축이 동률이라(실측: roundbutton 이 +Z 45.0 / -Z 45.0)
+ * 데이터와 다른 축을 짚을 수 있다.
+ */
+function getEscapeAxisLabel(failure_entry, assembly_result) {
+  if (failure_entry.first_blocked_pose === null) {
+    return null;
+  }
+  const initial_position = assembly_result.solids[failure_entry.solid].state.position;
+  const displacements = failure_entry.first_blocked_pose.state.position.map(
+    (value, axis_index) => value - initial_position[axis_index],
+  );
+  let axis_index = 0;
+  for (let candidate_index = 1; candidate_index < 3; candidate_index += 1) {
+    if (Math.abs(displacements[candidate_index]) > Math.abs(displacements[axis_index])) {
+      axis_index = candidate_index;
+    }
+  }
+  if (Math.abs(displacements[axis_index]) <= 0) {
+    return null;
+  }
+  return `${displacements[axis_index] > 0 ? "+" : "-"}${AXIS_NAMES[axis_index]}`;
+}
+
+/**
+ * 실패 한 건을 화면에 뿌릴 구조로 정리한다.
+ *
+ * [임시] 지금은 이동 방향과 막은 부품만 담는다. 간섭 위치·범위·겹침 형상 내보내기처럼
+ * CAD 수정에 쓸 항목은 팀 논의 뒤에 정한다.
+ *
+ * 결론을 "분해 불가능" 으로 적지 않는다 — 탐색은 예산(반복 횟수·시간) 안에서만 완전하고,
+ * first_blocked_pose 는 여섯 축 중 가장 가까운 출구 한 방향의 증거일 뿐이다.
+ */
+function getFailureReport(failure_entry, assembly_result) {
+  const report = {
+    part_label: formatPartLabel(
+      assembly_result.solids[failure_entry.solid],
+      failure_entry.solid,
+    ),
+    verdict_text: "분해 실패",
+    escape_axis_label: getEscapeAxisLabel(failure_entry, assembly_result),
+    culprit_labels: [],
+    note_text: null,
+  };
+
+  if (failure_entry.last_valid_pose === null) {
+    // "초기 간섭" 이라고 부르지 않는다 — 조립 상태의 겹침 자체는 정상적인 조립체에
+    // 항상 있는 것(압입·삽입)이라, 그 말을 이 비정상 상태의 이름으로 쓰면 둘이 섞인다.
+    report.verdict_text = "조립 상태부터 막힘";
+    report.note_text = "조립 상태에서 이미 간섭 상한을 넘습니다."
+      + " 분해 이전에 조립 자체가 성립하지 않는 형상입니다.";
+  }
+  if (failure_entry.first_blocked_pose === null) {
+    report.verdict_text = "원인 미확정";
+    report.note_text = "막은 부품을 찾지 못했습니다."
+      + " 형상이 아니라 탐색 한계(반복 횟수·시간)일 수 있습니다.";
+    return report;
+  }
+
+  report.culprit_labels = getCulpritOverlaps(failure_entry.first_blocked_pose).map(
+    (overlap_entry) => formatPartLabel(
+      assembly_result.solids[overlap_entry.obstacle],
+      overlap_entry.obstacle,
+    ),
+  );
+  if (report.culprit_labels.length === 0 && report.note_text === null) {
+    report.note_text = "막힌 자세는 찾았으나 상한을 넘긴 겹침이 없습니다.";
+  }
+  return report;
+}
+
+/** 트리 버튼 툴팁용 한 줄 요약. 리포트를 열지 않고도 무엇이 막았는지 보이게 한다. */
+function getFailureSummaryText(failure_entry, assembly_result) {
+  const report = getFailureReport(failure_entry, assembly_result);
+  if (report.culprit_labels.length === 0) {
+    return report.note_text ?? "막은 부품을 특정하지 못했습니다";
+  }
+  const direction_text = report.escape_axis_label === null
+    ? ""
+    : `${report.escape_axis_label} 방향 · `;
+  return `${direction_text}${report.culprit_labels.join(", ")} 에 막힘`;
+}
+
 function checkIsAssemblyFile(file) {
   const lowered_name = file.name.toLowerCase();
   const has_allowed_suffix = ALLOWED_ASSEMBLY_SUFFIXES.some((suffix) =>
@@ -337,6 +444,133 @@ function remapTrajectorySolidIndexes(trajectories, part_index_to_dense_index) {
   });
 }
 
+/**
+ * failures 를 렌더러가 쓰는 dense index 기준으로 정규화한다.
+ *
+ * 원본 failures 의 키와 overlaps[].obstacle 은 파서 part_index 다. solids/trajectories 와
+ * 같은 재매핑을 태우지 않으면 엉뚱한 부품을 범인으로 지목한다. 부품 식별자는 실행마다
+ * 달라지므로(같은 STEP 이라도 sub1/bottom 의 id 가 뒤바뀐 실측이 있다) 이 재매핑은
+ * 선택이 아니다.
+ *
+ * closest_path 는 trajectories 와 구조가 같지만 mergeColinearTrajectoryFrames 를 적용하지
+ * 않는다 — 실패 경로는 탐색이 더듬은 스텝 수 자체가 정보이고, 재생은 별도 시퀀스가
+ * 담당하기 때문이다.
+ */
+function getDenseSolidIndex(part_index_entry, part_index_to_dense_index, field_name) {
+  if (!Number.isInteger(part_index_entry)) {
+    throw new ResultLoadException(`${field_name} must be an integer`);
+  }
+  if (!part_index_to_dense_index.has(part_index_entry)) {
+    throw new ResultLoadException(
+      `${field_name}=${part_index_entry} is missing from solids`,
+    );
+  }
+  return part_index_to_dense_index.get(part_index_entry);
+}
+
+function getValidatedOverlapMesh(mesh_entry, field_name) {
+  if (mesh_entry === null || typeof mesh_entry !== "object") {
+    throw new ResultLoadException(`${field_name} must be an object`);
+  }
+  if (!Array.isArray(mesh_entry.vertices)) {
+    throw new ResultLoadException(`${field_name}.vertices must be an array`);
+  }
+  if (!Array.isArray(mesh_entry.faces)) {
+    throw new ResultLoadException(`${field_name}.faces must be an array`);
+  }
+  // 정점은 해당 자세가 이미 적용된 월드 좌표다. solids[].mesh 와 달리 state 변환을
+  // 곱하지 않고 그대로 그린다.
+  return { vertices: mesh_entry.vertices, faces: mesh_entry.faces };
+}
+
+function getNormalizedOverlaps(overlaps_entry, part_index_to_dense_index, field_name) {
+  // 겹침이 하나도 없는 자세가 실제로 존재한다(hair_dryer 의 fan). 빈 목록이 정상이다.
+  return getIndexedEntriesWithKeys(overlaps_entry, field_name).map(
+    ({ key: overlap_index, entry: overlap_entry }) => {
+      const overlap_field_name = `${field_name}[${overlap_index}]`;
+      if (overlap_entry === null || typeof overlap_entry !== "object") {
+        throw new ResultLoadException(`${overlap_field_name} must be an object`);
+      }
+      if (typeof overlap_entry.is_over_limit !== "boolean") {
+        throw new ResultLoadException(
+          `${overlap_field_name}.is_over_limit must be a boolean`,
+        );
+      }
+      return {
+        obstacle: getDenseSolidIndex(
+          overlap_entry.obstacle,
+          part_index_to_dense_index,
+          `${overlap_field_name}.obstacle`,
+        ),
+        is_over_limit: overlap_entry.is_over_limit,
+        mesh: getValidatedOverlapMesh(
+          overlap_entry.mesh,
+          `${overlap_field_name}.mesh`,
+        ),
+      };
+    },
+  );
+}
+
+function getNormalizedFailurePose(pose_entry, part_index_to_dense_index, field_name) {
+  // null 은 오류가 아니라 규약이다. last_valid_pose 가 null 이면 조립 상태부터 상한을
+  // 넘은 것이고, first_blocked_pose 가 null 이면 막은 자세를 찾지 못한 것이다(탐색 한계).
+  // 둘이 동시에 null 이 되지는 않으므로 최소 한 자세는 항상 남는다.
+  if (pose_entry === null || pose_entry === undefined) {
+    return null;
+  }
+  if (typeof pose_entry !== "object") {
+    throw new ResultLoadException(`${field_name} must be an object or null`);
+  }
+  return {
+    state: getValidatedState(pose_entry.state, `${field_name}.state`),
+    overlaps: getNormalizedOverlaps(
+      pose_entry.overlaps,
+      part_index_to_dense_index,
+      `${field_name}.overlaps`,
+    ),
+  };
+}
+
+function getNormalizedFailures(failures_entry, part_index_to_dense_index) {
+  // 전부 분해에 성공하면 백엔드가 failures 키 자체를 내보내지 않는다(빈 맵이 아니라 부재).
+  if (failures_entry === null || failures_entry === undefined) {
+    return [];
+  }
+
+  return getIndexedEntriesWithKeys(failures_entry, "failures").map(
+    ({ key: part_index, entry: failure_entry }) => {
+      const field_name = `failures[${part_index}]`;
+      if (failure_entry === null || typeof failure_entry !== "object") {
+        throw new ResultLoadException(`${field_name} must be an object`);
+      }
+
+      const closest_path_entries = getIndexedEntriesWithKeys(
+        failure_entry.closest_path,
+        `${field_name}.closest_path`,
+      ).map(({ entry }) => entry);
+
+      return {
+        solid: getDenseSolidIndex(part_index, part_index_to_dense_index, field_name),
+        closest_path: remapTrajectorySolidIndexes(
+          closest_path_entries,
+          part_index_to_dense_index,
+        ),
+        last_valid_pose: getNormalizedFailurePose(
+          failure_entry.last_valid_pose,
+          part_index_to_dense_index,
+          `${field_name}.last_valid_pose`,
+        ),
+        first_blocked_pose: getNormalizedFailurePose(
+          failure_entry.first_blocked_pose,
+          part_index_to_dense_index,
+          `${field_name}.first_blocked_pose`,
+        ),
+      };
+    },
+  );
+}
+
 function getActionDirectionKey(action_entry, field_name) {
   if (action_entry === null || typeof action_entry !== "object") {
     throw new ResultLoadException(`${field_name} must be an object`);
@@ -469,6 +703,10 @@ function normalizeAssemblyPayload(raw_payload) {
     trajectories,
     part_index_to_dense_index,
   );
+  const failures = getNormalizedFailures(
+    raw_payload.failures,
+    part_index_to_dense_index,
+  );
 
   const step_path =
     typeof metadata_entry.step_path === "string" && metadata_entry.step_path !== ""
@@ -482,6 +720,7 @@ function normalizeAssemblyPayload(raw_payload) {
     },
     solids: normalized_solids,
     trajectories: remapped_trajectories,
+    failures,
   };
 }
 
@@ -525,6 +764,7 @@ class ViewerDashboard {
     this._is_service_mode = false;
 
     this._viewer_status = getRequiredElement("viewer-status");
+    this._failure_report = getRequiredElement("failure-report");
     this._summary_normal = getRequiredElement("summary-normal");
     this._summary_collision = getRequiredElement("summary-collision");
     this._hud_frames = getRequiredElement("hud-frames");
@@ -666,6 +906,7 @@ class ViewerDashboard {
   }
 
   _setViewerStatus(message, is_busy) {
+    this._hideFailureReport();
     this._viewer_status.textContent = message;
     this._viewer_status.classList.toggle("is-busy", is_busy);
     this._viewer_status.classList.remove("hidden");
@@ -695,6 +936,7 @@ class ViewerDashboard {
 
   _renderPartTree(assembly_result) {
     const moving_solid_indexes = getMovingSolidIndexSet(assembly_result.trajectories);
+    const failure_by_solid_index = getFailureBySolidIndex(assembly_result.failures);
     const solid_indexes = this._has_assembly_plan
       ? getSolidIndexesInTrajectoryOrder(
           assembly_result.solids,
@@ -735,7 +977,15 @@ class ViewerDashboard {
       part_name.textContent = part_label;
       part_name.title = part_label;
 
+      // 부품 상태는 세 갈래다.
+      //   궤적 있음            -> 재생 버튼 + conversion 라벨 (기존 그대로)
+      //   궤적 없음 + failures -> 실패 분석 버튼 하나가 두 칸을 차지
+      //   그 외                -> 경로 없음 (판정에서 빠진 부품 등)
+      // 궤적과 failures 는 서로소이고 합집합이 전체 부품이라, 세 번째 갈래는 실측
+      // 데이터에서는 나오지 않는다. 방어용으로만 둔다.
+      const failure_entry = failure_by_solid_index.get(solid_index) ?? null;
       let action_element = null;
+      let trailing_element = null;
       if (this._has_assembly_plan) {
         if (moving_solid_indexes.has(solid_index)) {
           action_element = document.createElement("button");
@@ -747,25 +997,42 @@ class ViewerDashboard {
             event.stopPropagation();
             this._playSolidTrajectory(solid_index);
           });
+          const conversion_display = getConversionDisplay(solid_entry.conversion);
+          trailing_element = document.createElement("span");
+          trailing_element.className = conversion_display.class_name;
+          trailing_element.textContent = conversion_display.text;
+          trailing_element.title = `conversion: ${conversion_display.text}`;
+        } else if (failure_entry !== null) {
+          action_element = document.createElement("button");
+          action_element.type = "button";
+          action_element.className = "part-failure-button";
+          action_element.textContent = "실패 분석";
+          action_element.title = getFailureSummaryText(failure_entry, assembly_result);
+          action_element.addEventListener("click", (event) => {
+            event.stopPropagation();
+            this._openFailureAnalysis(solid_index);
+          });
         } else {
           action_element = document.createElement("span");
           action_element.className = "part-path-error";
-          action_element.textContent = "빈 조립경로";
-          action_element.title = "빈 조립경로";
+          action_element.textContent = "분해 경로 없음";
+          action_element.title = "분해 경로 없음";
         }
+      } else {
+        const conversion_display = getConversionDisplay(solid_entry.conversion);
+        trailing_element = document.createElement("span");
+        trailing_element.className = conversion_display.class_name;
+        trailing_element.textContent = conversion_display.text;
+        trailing_element.title = `conversion: ${conversion_display.text}`;
       }
-
-      const conversion_display = getConversionDisplay(solid_entry.conversion);
-      const conversion_label = document.createElement("span");
-      conversion_label.className = conversion_display.class_name;
-      conversion_label.textContent = conversion_display.text;
-      conversion_label.title = `conversion: ${conversion_display.text}`;
 
       list_item.append(visibility_checkbox, color_swatch, part_name);
       if (action_element !== null) {
         list_item.append(action_element);
       }
-      list_item.append(conversion_label);
+      if (trailing_element !== null) {
+        list_item.append(trailing_element);
+      }
       list_item.addEventListener("click", () => {
         this._selectSolid(solid_index);
       });
@@ -774,8 +1041,91 @@ class ViewerDashboard {
   }
 
   _playSolidTrajectory(solid_index) {
+    this._hideFailureReport();
     this._selectSolid(solid_index);
     this._assembly_renderer.playSolid(solid_index);
+  }
+
+  _openFailureAnalysis(solid_index) {
+    if (this._assembly_result === null) {
+      throw new AssemblyRenderException("failure analysis requires a loaded assembly result");
+    }
+    const failure_entry = getFailureBySolidIndex(this._assembly_result.failures).get(solid_index);
+    if (failure_entry === undefined) {
+      throw new AssemblyRenderException(
+        `solid ${solid_index} has no failure entry to analyse`,
+      );
+    }
+
+    this._selectSolid(solid_index);
+    // 실패 시점에 남아 있던 부품 = 실패 부품 전체다. 성공한 부품은 이미 400 밖으로
+    // 나가 있어 장애물도 아니고 카메라만 벌린다.
+    const visible_solid_indexes = this._assembly_result.failures.map(
+      (entry) => entry.solid,
+    );
+    this._assembly_renderer.startFailureAnalysis({
+      solid_index,
+      visible_solid_indexes,
+      closest_path: failure_entry.closest_path,
+      last_valid_pose: failure_entry.last_valid_pose,
+      first_blocked_pose: failure_entry.first_blocked_pose,
+    });
+
+    this._renderFailureReport(getFailureReport(failure_entry, this._assembly_result));
+    this._viewer_status.classList.add("hidden");
+  }
+
+  _hideFailureReport() {
+    this._failure_report.replaceChildren();
+    this._failure_report.classList.add("hidden");
+  }
+
+  _renderFailureReport(report) {
+    const createText = (text, class_name) => {
+      const text_element = document.createElement("span");
+      text_element.className = class_name;
+      text_element.textContent = text;
+      return text_element;
+    };
+    const appendRow = (parent_element, label_text, value_element) => {
+      const row_element = document.createElement("div");
+      row_element.className = "failure-row";
+      row_element.append(createText(label_text, "failure-row-label"), value_element);
+      parent_element.append(row_element);
+    };
+
+    this._failure_report.replaceChildren();
+
+    const header_element = document.createElement("div");
+    header_element.className = "failure-header";
+    header_element.append(
+      createText(report.part_label, "failure-part"),
+      createText(report.verdict_text, "failure-verdict"),
+    );
+
+    const body_element = document.createElement("div");
+    body_element.className = "failure-body";
+    if (report.escape_axis_label !== null) {
+      appendRow(
+        body_element,
+        "이동 방향",
+        createText(report.escape_axis_label, "failure-value"),
+      );
+    }
+    // 범인이 둘 이상인 자세가 실제로 있으므로(실측: handpart 는 3개) 전부 나열한다.
+    for (const [index, culprit_label] of report.culprit_labels.entries()) {
+      appendRow(
+        body_element,
+        index === 0 ? "막은 부품" : "",
+        createText(culprit_label, "failure-obstacle-name"),
+      );
+    }
+    if (report.note_text !== null) {
+      body_element.append(createText(report.note_text, "failure-note"));
+    }
+
+    this._failure_report.append(header_element, body_element);
+    this._failure_report.classList.remove("hidden");
   }
 
   _selectSolid(solid_index) {
@@ -845,12 +1195,14 @@ class ViewerDashboard {
 
   _bindPlaybackControls() {
     this._play_button.addEventListener("click", () => {
+      this._hideFailureReport();
       this._assembly_renderer.play();
     });
     this._pause_button.addEventListener("click", () => {
       this._assembly_renderer.pause();
     });
     this._stop_button.addEventListener("click", () => {
+      this._hideFailureReport();
       this._assembly_renderer.stop();
     });
     this._reset_view_button.addEventListener("click", () => {

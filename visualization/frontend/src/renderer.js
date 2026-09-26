@@ -1,8 +1,10 @@
 /**
  * solids / trajectories를 Three.js mesh로 렌더링하고 궤적 애니메이션을 재생한다.
  *
- * 회전 규약: 팀 State와 동일하게 scipy 'xyz' extrinsic(degrees).
- * Three.js에서는 extrinsic XYZ ≡ intrinsic ZYX 로 매핑한다.
+ * 회전 규약: 팀 State 와 동일하게 scipy "XYZ" intrinsic(degrees) = R = Rx·Ry·Rz.
+ * three.js 의 Euler order "XYZ" 가 같은 곱 순서이므로 그대로 쓴다.
+ * (core/state.py 는 대문자 "XYZ" = intrinsic 이다. 소문자 "xyz" = extrinsic 으로 읽고
+ *  three.js "ZYX" 로 매핑하면 역순이 되어 4 가지 시험 자세 모두 어긋난다.)
  *
  * playback_time_seconds: 연속 재생 시각.
  *   0 = 초기 분해 자세,
@@ -30,6 +32,23 @@ const SOLID_COLORS = [
   0x8c564b,
   0x7f7f7f,
 ];
+
+// 실패 분석 연출 상수.
+// 이동량이 조립체 크기의 0.5% 안팎인 경우가 많아(실측: 10건 중 7건) 속도로 승부할 수
+// 없다. 구간마다 고정 시간을 주고 정지 구간을 끼워 "어디서 멈췄는지"를 읽히게 한다.
+const FAILURE_PATH_TOTAL_SECONDS = 1.2;
+const FAILURE_HOLD_VALID_SECONDS = 0.6;
+const FAILURE_PUSH_SECONDS = 0.8;
+const FAILURE_BLOCKED_SECONDS = 1.6;
+// 초당 3회 이상 깜빡이면 광과민성 발작 위험이 있어 1.25Hz 로 둔다.
+const FAILURE_PULSE_FREQUENCY_HZ = 1.25;
+const CULPRIT_OVERLAP_COLOR = 0xff4d4d;
+const CONTACT_OVERLAP_COLOR = 0x5aa9ff;
+// 분석 중 나머지 부품을 반투명으로 낮춰 겹침이 어느 부품 속인지 보이게 한다.
+const FAILURE_DIMMED_OPACITY = 0.22;
+
+// 백엔드 State 의 회전 규약. scipy "XYZ" intrinsic 과 three.js "XYZ" 가 같은 곱 순서다.
+const STATE_EULER_ORDER = "XYZ";
 
 export class AssemblyRenderException extends Error {
   constructor(message) {
@@ -82,11 +101,12 @@ function applyStateToObject(object3d, state) {
     THREE.MathUtils.degToRad(rotation_x_degrees),
     THREE.MathUtils.degToRad(rotation_y_degrees),
     THREE.MathUtils.degToRad(rotation_z_degrees),
-    "ZYX",
+    STATE_EULER_ORDER,
   );
 }
 
 function getStateFromObject(object3d) {
+  // applyStateToObject 가 STATE_EULER_ORDER 로 넣은 값을 그대로 되읽는다.
   return {
     position: [object3d.position.x, object3d.position.y, object3d.position.z],
     rotation: [
@@ -102,24 +122,61 @@ function getEasedAlpha(linear_alpha) {
   return clamped_alpha * clamped_alpha * (3 - 2 * clamped_alpha);
 }
 
+// 보간용 임시 객체. 프레임마다 새로 만들지 않으려고 모듈 수준에 둔다.
+const START_EULER = new THREE.Euler();
+const END_EULER = new THREE.Euler();
+const START_QUATERNION = new THREE.Quaternion();
+const END_QUATERNION = new THREE.Quaternion();
+const INTERPOLATED_EULER = new THREE.Euler();
+
+/**
+ * 두 상태 사이를 보간한다. 위치는 선형, 자세는 사원수 구면 보간(slerp)이다.
+ *
+ * 오일러 성분을 따로 선형 보간하면 같은 자세로 도착하더라도 중간에 실재하지 않는
+ * 방향으로 휘고, 특정 조합에서는 짐벌락으로 축이 무너진다. 백엔드 플래너도 회전 구간
+ * 검사에 scipy Slerp 를 쓰므로(core/planner.py) 같은 방식으로 맞춘다.
+ */
 function interpolateState(start_state, end_state, alpha) {
   const eased_alpha = getEasedAlpha(alpha);
+  const position = [
+    start_state.position[0]
+      + (end_state.position[0] - start_state.position[0]) * eased_alpha,
+    start_state.position[1]
+      + (end_state.position[1] - start_state.position[1]) * eased_alpha,
+    start_state.position[2]
+      + (end_state.position[2] - start_state.position[2]) * eased_alpha,
+  ];
+
+  const has_same_rotation = start_state.rotation[0] === end_state.rotation[0]
+    && start_state.rotation[1] === end_state.rotation[1]
+    && start_state.rotation[2] === end_state.rotation[2];
+  if (has_same_rotation) {
+    return { position, rotation: [...start_state.rotation] };
+  }
+
+  START_EULER.set(
+    THREE.MathUtils.degToRad(start_state.rotation[0]),
+    THREE.MathUtils.degToRad(start_state.rotation[1]),
+    THREE.MathUtils.degToRad(start_state.rotation[2]),
+    STATE_EULER_ORDER,
+  );
+  END_EULER.set(
+    THREE.MathUtils.degToRad(end_state.rotation[0]),
+    THREE.MathUtils.degToRad(end_state.rotation[1]),
+    THREE.MathUtils.degToRad(end_state.rotation[2]),
+    STATE_EULER_ORDER,
+  );
+  START_QUATERNION.setFromEuler(START_EULER);
+  END_QUATERNION.setFromEuler(END_EULER);
+  START_QUATERNION.slerp(END_QUATERNION, eased_alpha);
+  INTERPOLATED_EULER.setFromQuaternion(START_QUATERNION, STATE_EULER_ORDER);
+
   return {
-    position: [
-      start_state.position[0]
-        + (end_state.position[0] - start_state.position[0]) * eased_alpha,
-      start_state.position[1]
-        + (end_state.position[1] - start_state.position[1]) * eased_alpha,
-      start_state.position[2]
-        + (end_state.position[2] - start_state.position[2]) * eased_alpha,
-    ],
+    position,
     rotation: [
-      start_state.rotation[0]
-        + (end_state.rotation[0] - start_state.rotation[0]) * eased_alpha,
-      start_state.rotation[1]
-        + (end_state.rotation[1] - start_state.rotation[1]) * eased_alpha,
-      start_state.rotation[2]
-        + (end_state.rotation[2] - start_state.rotation[2]) * eased_alpha,
+      THREE.MathUtils.radToDeg(INTERPOLATED_EULER.x),
+      THREE.MathUtils.radToDeg(INTERPOLATED_EULER.y),
+      THREE.MathUtils.radToDeg(INTERPOLATED_EULER.z),
     ],
   };
 }
@@ -197,8 +254,12 @@ export class AssemblyRenderer {
     this._onWindowResize = this._onWindowResize.bind(this);
     window.addEventListener("resize", this._onWindowResize);
 
+    this._failure_analysis = null;
+
     this._renderer.setAnimationLoop(() => {
-      this._updateAnimation(this._clock.getDelta());
+      const delta_seconds = this._clock.getDelta();
+      this._updateAnimation(delta_seconds);
+      this._updateFailureAnimation(delta_seconds);
       this._orbit_controls.update();
       this._renderer.render(this._scene, this._camera);
     });
@@ -209,6 +270,7 @@ export class AssemblyRenderer {
   }
 
   loadAssembly(assembly_result) {
+    this.stopFailureAnalysis();
     this._clearSolids();
     this.pause();
 
@@ -244,6 +306,7 @@ export class AssemblyRenderer {
   }
 
   clearAssembly() {
+    this.stopFailureAnalysis();
     this.pause();
     this._clearPlaybackRange();
     this._clearSolids();
@@ -327,6 +390,7 @@ export class AssemblyRenderer {
   }
 
   play() {
+    this.stopFailureAnalysis();
     this._clearPlaybackRange();
     this._restoreFullTrajectoryPlaylist();
     if (this._trajectory_frames.length === 0) {
@@ -341,6 +405,7 @@ export class AssemblyRenderer {
   }
 
   playSolid(solid_index) {
+    this.stopFailureAnalysis();
     if (!Number.isInteger(solid_index)) {
       throw new AssemblyRenderException(
         `solid_index must be an integer, received ${solid_index}`,
@@ -383,6 +448,7 @@ export class AssemblyRenderer {
   }
 
   stop() {
+    this.stopFailureAnalysis();
     this.pause();
     this._clearPlaybackRange();
     this._restoreFullTrajectoryPlaylist();
@@ -390,6 +456,7 @@ export class AssemblyRenderer {
   }
 
   seekToTime(playback_time_seconds) {
+    this.stopFailureAnalysis();
     if (!Number.isFinite(playback_time_seconds)) {
       throw new AssemblyRenderException(
         `playback_time_seconds must be a finite number, received ${playback_time_seconds}`,
@@ -619,6 +686,278 @@ export class AssemblyRenderer {
 
     this._orbit_controls.target.copy(center);
     this._orbit_controls.update();
+  }
+
+  /**
+   * 실패 분석 모드로 들어간다.
+   *
+   * 화면에는 실패한 부품들만 남긴다. 분해에 성공한 부품은 이미 400 밖으로 나가 있어
+   * 카메라를 크게 벌리기만 하고, 실패 시점에는 장애물도 아니다. 실측으로 확인한 대로
+   * overlaps 의 장애물은 모두 실패 부품 집합 안에 있으므로 숨겨진 부품이 범인일 일은
+   * 없다(그리디 루프가 멈춘 시점의 남은 부품이 곧 실패 집합이기 때문이다).
+   *
+   * @param failure_analysis {solid_index, visible_solid_indexes, closest_path,
+   *                          last_valid_pose, first_blocked_pose}
+   */
+  startFailureAnalysis(failure_analysis) {
+    const {
+      solid_index,
+      visible_solid_indexes,
+      closest_path,
+      last_valid_pose,
+      first_blocked_pose,
+    } = failure_analysis;
+
+    const moving_solid_mesh = this._solid_meshes[solid_index];
+    if (moving_solid_mesh === undefined) {
+      throw new AssemblyRenderException(`solid index ${solid_index} is out of range`);
+    }
+
+    this.pause();
+    this._clearPlaybackRange();
+    this.stopFailureAnalysis();
+    this._restoreInitialStates();
+
+    const visible_index_set = new Set(visible_solid_indexes);
+    this._solid_meshes.forEach((solid_mesh, index) => {
+      solid_mesh.visible = visible_index_set.has(index);
+      if (!solid_mesh.visible) {
+        return;
+      }
+      // 겹침은 부품 속에 있다. 부품을 반투명으로 낮춰야 빨간 덩어리가 어느 부품
+      // 안쪽인지 읽힌다. depthWrite 를 끄지 않으면 반투명끼리 정렬이 깨진다.
+      solid_mesh.material.transparent = true;
+      solid_mesh.material.opacity = index === solid_index ? 0.45 : FAILURE_DIMMED_OPACITY;
+      solid_mesh.material.depthWrite = false;
+    });
+
+    const initial_state = this._initial_states[solid_index];
+    const valid_state = last_valid_pose === null ? initial_state : last_valid_pose.state;
+    const blocked_state = first_blocked_pose === null ? null : first_blocked_pose.state;
+
+    this._failure_analysis = {
+      solid_index,
+      path_frames: closest_path,
+      initial_state,
+      valid_state,
+      blocked_state,
+      // 막힌 자세의 겹침만 만든다. 마지막 정상 자세의 맞물림 겹침은 조각 수가
+      // 수백 개인 경우가 있어(실측 507개) 기본으로는 만들지 않는다.
+      overlap_meshes: first_blocked_pose === null
+        ? []
+        : this._buildFailureOverlapMeshes(first_blocked_pose),
+      phase_name: "path",
+      phase_elapsed_seconds: 0,
+    };
+
+    this._applyFailurePhase(0);
+    this._fitCameraToFailure(this._failure_analysis);
+    this._clock.start();
+  }
+
+  stopFailureAnalysis() {
+    if (this._failure_analysis === null) {
+      return;
+    }
+    this._clearFailureOverlapMeshes();
+    this._failure_analysis = null;
+
+    for (const solid_mesh of this._solid_meshes) {
+      solid_mesh.visible = true;
+      solid_mesh.material.transparent = false;
+      solid_mesh.material.opacity = 1.0;
+      solid_mesh.material.depthWrite = true;
+    }
+    this._restoreInitialStates();
+    this._clock.stop();
+    this._notifyFrameChange();
+  }
+
+  isAnalysingFailure() {
+    return this._failure_analysis !== null;
+  }
+
+  /** 설계상의 맞물림(is_over_limit=false) 겹침을 함께 보여줄지 전환한다. */
+  setContactOverlapVisibility(is_visible) {
+    if (this._failure_analysis === null) {
+      return;
+    }
+    for (const overlap_mesh of this._failure_analysis.overlap_meshes) {
+      if (!overlap_mesh.userData.is_over_limit) {
+        overlap_mesh.userData.is_shown = is_visible;
+      }
+    }
+  }
+
+  _buildFailureOverlapMeshes(pose_entry) {
+    return pose_entry.overlaps.map((overlap_entry) => {
+      const geometry = createSolidGeometry(overlap_entry.mesh);
+      const is_over_limit = overlap_entry.is_over_limit;
+      const material = new THREE.MeshStandardMaterial({
+        color: is_over_limit ? CULPRIT_OVERLAP_COLOR : CONTACT_OVERLAP_COLOR,
+        emissive: is_over_limit ? CULPRIT_OVERLAP_COLOR : 0x000000,
+        emissiveIntensity: 0.0,
+        metalness: 0.0,
+        roughness: 0.4,
+        // 겹침은 정의상 두 부품 내부라 그냥 그리면 부품 껍데기에 가려 한 픽셀도
+        // 나오지 않는다. 게다가 A∩B 의 표면은 A·B 의 표면 조각으로 이루어져 있어
+        // 부품 삼각형과 같은 평면에 놓이므로 z-fighting 이 반드시 난다.
+        // 깊이 검사를 끄고 마지막에 그려 두 문제를 함께 없앤다.
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.95,
+      });
+      const overlap_mesh = new THREE.Mesh(geometry, material);
+      overlap_mesh.renderOrder = 999;
+      // 정점이 이미 월드 좌표다. state 변환을 곱하면 안 된다.
+      overlap_mesh.position.set(0, 0, 0);
+      overlap_mesh.rotation.set(0, 0, 0);
+      overlap_mesh.visible = false;
+      overlap_mesh.userData.is_over_limit = is_over_limit;
+      overlap_mesh.userData.is_shown = is_over_limit;
+      this._scene.add(overlap_mesh);
+      return overlap_mesh;
+    });
+  }
+
+  _clearFailureOverlapMeshes() {
+    for (const overlap_mesh of this._failure_analysis.overlap_meshes) {
+      this._scene.remove(overlap_mesh);
+      overlap_mesh.geometry.dispose();
+      overlap_mesh.material.dispose();
+    }
+    this._failure_analysis.overlap_meshes = [];
+  }
+
+  _fitCameraToFailure(failure_analysis) {
+    const solid_mesh = this._solid_meshes[failure_analysis.solid_index];
+    const bounding_box = new THREE.Box3().setFromObject(solid_mesh);
+    for (const overlap_mesh of failure_analysis.overlap_meshes) {
+      bounding_box.union(new THREE.Box3().setFromObject(overlap_mesh));
+    }
+    if (bounding_box.isEmpty()) {
+      return;
+    }
+    this._fitCameraToBoundingBox([
+      bounding_box.min.x, bounding_box.min.y, bounding_box.min.z,
+      bounding_box.max.x, bounding_box.max.y, bounding_box.max.z,
+    ]);
+  }
+
+  /**
+   * 실패 분석 재생을 한 프레임 진행한다.
+   *
+   * 네 구간을 순환한다.
+   *   path    closest_path 를 따라 마지막 정상 자세까지 간다(스텝이 0 이면 건너뛴다)
+   *   valid   마지막 정상 자세에서 멈춘다 — "여기까지는 정상" 을 읽을 시간
+   *   push    막힌 자세까지 민다
+   *   blocked 상한을 넘긴 겹침을 붉게 맥동시킨다
+   * first_blocked_pose 가 null 이면(막은 증거를 찾지 못한 경우) push·blocked 를 건너뛴다.
+   */
+  _updateFailureAnimation(delta_seconds) {
+    if (this._failure_analysis === null) {
+      return;
+    }
+    const failure_analysis = this._failure_analysis;
+    failure_analysis.phase_elapsed_seconds += delta_seconds;
+
+    const phase_duration = this._getFailurePhaseDuration(failure_analysis);
+    if (failure_analysis.phase_elapsed_seconds >= phase_duration) {
+      failure_analysis.phase_elapsed_seconds -= phase_duration;
+      failure_analysis.phase_name = this._getNextFailurePhase(failure_analysis);
+    }
+    this._applyFailurePhase(failure_analysis.phase_elapsed_seconds);
+  }
+
+  _getFailurePhaseDuration(failure_analysis) {
+    switch (failure_analysis.phase_name) {
+      case "path":
+        // 스텝 수와 무관하게 총 시간을 고정한다. 스텝당 고정 시간을 주면 7 스텝짜리는
+        // 늘어지고 1 스텝짜리는 눈에 안 들어온다.
+        return failure_analysis.path_frames.length === 0 ? 0 : FAILURE_PATH_TOTAL_SECONDS;
+      case "valid":
+        return FAILURE_HOLD_VALID_SECONDS;
+      case "push":
+        return FAILURE_PUSH_SECONDS;
+      default:
+        return FAILURE_BLOCKED_SECONDS;
+    }
+  }
+
+  _getNextFailurePhase(failure_analysis) {
+    const has_blocked_pose = failure_analysis.blocked_state !== null;
+    switch (failure_analysis.phase_name) {
+      case "path":
+        return "valid";
+      case "valid":
+        return has_blocked_pose ? "push" : "path";
+      case "push":
+        return "blocked";
+      default:
+        return "path";
+    }
+  }
+
+  _applyFailurePhase(phase_elapsed_seconds) {
+    const failure_analysis = this._failure_analysis;
+    const solid_mesh = this._solid_meshes[failure_analysis.solid_index];
+    const phase_duration = this._getFailurePhaseDuration(failure_analysis);
+    const phase_alpha = phase_duration <= 0
+      ? 1
+      : Math.min(1, phase_elapsed_seconds / phase_duration);
+
+    let is_blocked_phase = false;
+    if (failure_analysis.phase_name === "path") {
+      applyStateToObject(
+        solid_mesh,
+        this._getFailurePathState(failure_analysis, phase_alpha),
+      );
+    } else if (failure_analysis.phase_name === "valid") {
+      applyStateToObject(solid_mesh, failure_analysis.valid_state);
+    } else if (failure_analysis.phase_name === "push") {
+      applyStateToObject(
+        solid_mesh,
+        interpolateState(
+          failure_analysis.valid_state,
+          failure_analysis.blocked_state,
+          phase_alpha,
+        ),
+      );
+    } else {
+      applyStateToObject(solid_mesh, failure_analysis.blocked_state);
+      is_blocked_phase = true;
+    }
+
+    // 겹침은 막힌 자세의 것이므로 그 자세에 도달한 뒤에만 보여준다. 그 전에 띄우면
+    // 부품이 아직 없는 자리에 덩어리만 떠 있게 된다.
+    const pulse_alpha = is_blocked_phase
+      ? 0.35 + 0.65 * (0.5 - 0.5 * Math.cos(
+          2 * Math.PI * FAILURE_PULSE_FREQUENCY_HZ * phase_elapsed_seconds))
+      : 0;
+    for (const overlap_mesh of failure_analysis.overlap_meshes) {
+      overlap_mesh.visible = is_blocked_phase && overlap_mesh.userData.is_shown;
+      if (overlap_mesh.userData.is_over_limit) {
+        overlap_mesh.material.emissiveIntensity = pulse_alpha;
+      }
+    }
+  }
+
+  _getFailurePathState(failure_analysis, phase_alpha) {
+    const path_frames = failure_analysis.path_frames;
+    if (path_frames.length === 0) {
+      return failure_analysis.valid_state;
+    }
+    const scaled_position = phase_alpha * path_frames.length;
+    const frame_index = Math.min(path_frames.length - 1, Math.floor(scaled_position));
+    const start_state = frame_index === 0
+      ? failure_analysis.initial_state
+      : path_frames[frame_index - 1].state;
+    return interpolateState(
+      start_state,
+      path_frames[frame_index].state,
+      scaled_position - frame_index,
+    );
   }
 
   _clearSolids() {
