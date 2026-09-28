@@ -116,4 +116,30 @@ npm run dev
         ├── action
             ├── type
             ├── value
+├── failures
+    ├── <id>
+        ├── closest_path
+            ├── <index>
+                ├── solid
+                ├── state
+                    ├── position
+                    ├── rotation
+                ├── action
+                    ├── type
+                    ├── value
+        ├── last_valid_pose
+            ├── state
+                ├── position
+                ├── rotation
+        ├── first_blocked_pose
+            ├── state
+                ├── position
+                ├── rotation
+            ├── overlaps
+                ├── <index>
+                    ├── obstacle
+                    ├── is_over_limit
+                    ├── mesh
+                        ├── vertices
+                        ├── faces
 ```
