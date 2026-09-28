@@ -131,6 +131,22 @@ export class ViewerDashboard {
     this._assembly_result = loaded_step_result;
     this._has_assembly_plan = false;
     this._updateHeader(loaded_step_result, source_label);
+    this._renderPartNameList(loaded_step_result);
+  }
+
+  /** 파싱 직후의 조립 트리. 3D 는 아직 비워 두므로 버튼 없이 부품 이름만 보여 준다. */
+  _renderPartNameList(loaded_step_result) {
+    this._part_tree.replaceChildren();
+    loaded_step_result.solids.forEach((solid_entry, solid_index) => {
+      const list_item = document.createElement("li");
+      list_item.className = "part-item is-preview";
+      const part_name = document.createElement("span");
+      part_name.className = "part-name";
+      part_name.textContent = formatPartLabel(solid_entry, solid_index);
+      part_name.title = part_name.textContent;
+      list_item.append(part_name);
+      this._part_tree.append(list_item);
+    });
   }
 
   bindAssembly(assembly_result, source_label) {

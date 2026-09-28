@@ -358,6 +358,16 @@ input {
   transition: background 0.15s ease;
 }
 
+/* 파싱 직후의 이름 목록은 선택할 수 없다. */
+.part-item.is-preview {
+  grid-template-columns: minmax(0, 1fr);
+  cursor: default;
+}
+
+.part-item.is-preview:hover {
+  background: transparent;
+}
+
 .part-item:hover,
 .part-item.is-selected {
   background: var(--bg-hover);

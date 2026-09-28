@@ -72,7 +72,7 @@ def _get_mesh_global_bbox(meshes: list[Trimesh]) -> list[float]:
 
 def _serialize_mesh_entry(mesh: Trimesh, part_index: int) -> dict[str, object]:
     """메시 하나를 msgpack 으로 보낼 수 있는 dict 로. 자세는 조립 상태(전부 0)다."""
-    return {
+    entry: dict[str, object] = {
         "mesh": {
             "vertices": mesh.vertices.tolist(),
             "faces": mesh.faces.tolist(),
@@ -83,3 +83,8 @@ def _serialize_mesh_entry(mesh: Trimesh, part_index: int) -> dict[str, object]:
         },
         "part_index": part_index,
     }
+    # STEPLoader 가 붙인 부품 이름. 파싱 직후 조립 트리에 이름 목록으로 보여 준다.
+    name = mesh.metadata.get("name")
+    if isinstance(name, str) and name.strip() != "":
+        entry["name"] = name
+    return entry
