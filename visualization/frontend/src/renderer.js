@@ -18,6 +18,9 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 
 const SOLID_COLORS = [
   0x4c78a8,
@@ -48,8 +51,16 @@ const FAILURE_BLOCKED_SECONDS = 1.6;
 const FAILURE_PULSE_FREQUENCY_HZ = 1.25;
 const CULPRIT_OVERLAP_COLOR = 0xff4d4d;
 const CONTACT_OVERLAP_COLOR = 0x5aa9ff;
-// 분석 중 나머지 부품을 반투명으로 낮춰 겹침이 어느 부품 속인지 보이게 한다.
-const FAILURE_DIMMED_OPACITY = 0.22;
+// 실패 분석 중 부품 불투명도. 모든 부품을 반투명으로 두되, 충돌에 관련된 부품(움직이는
+// 부품 · 막은 부품)을 조금 더 진하게 둔다.
+const FAILURE_FOCUS_OPACITY = 0.45;
+const FAILURE_BACKGROUND_OPACITY = 0.3;
+// 충돌 영역(겹침 메시) 테두리. WebGL 기본 선은 1픽셀 고정이라 굵은 선 애드온을 쓴다.
+// 색은 겹침 색을 밝게 올려 겹침 면과 구분한다.
+const OVERLAP_OUTLINE_WIDTH_PIXELS = 2.5;
+const OVERLAP_OUTLINE_LIGHTEN = 0.22;
+// 이웃한 면이 이 각도 이상 꺾인 모서리만 테두리로 뽑는다. 곡면을 나눈 삼각형 경계는 빠진다.
+const OVERLAP_OUTLINE_THRESHOLD_DEGREES = 30;
 
 // 궤적 재생 속도(1배속). 이탈 거리 400(main.py ESCAPE_DISTANCE)이 1초가 되도록 잡았다.
 const TRANSLATION_SPEED_UNITS_PER_SECOND = 400;
@@ -111,6 +122,74 @@ function applyStateToObject(object3d, state) {
     THREE.MathUtils.degToRad(rotation_z_degrees),
     STATE_EULER_ORDER,
   );
+}
+
+const SOLID_LOOK_OPACITY = {
+  opaque: 1.0,
+  focus: FAILURE_FOCUS_OPACITY,
+  background: FAILURE_BACKGROUND_OPACITY,
+};
+
+/**
+ * 부품 재질의 표시 방식을 바꾼다. 어느 방식이든 z-buffer 에 깊이를 기록한다.
+ *   "opaque"     : 불투명 (일반 재생)
+ *   "focus"      : 반투명, 조금 진하게 (실패 분석의 움직이는 부품 · 막은 부품)
+ *   "background" : 반투명 (실패 분석의 나머지 부품)
+ *
+ * 반투명이어도 깊이를 기록하므로 앞뒤가 뒤섞이는 붕괴가 없다. 대신 먼저 그려진 반투명
+ * 부품이 그 뒤의 부품을 가릴 수 있다(Three.js 는 반투명 부품을 중심 거리 기준 뒤 → 앞으로
+ * 그리므로, 서로 감싸는 부품에서 주로 생긴다).
+ */
+function setSolidMaterialLook(material, look) {
+  material.transparent = look !== "opaque";
+  material.opacity = SOLID_LOOK_OPACITY[look];
+  material.depthWrite = true;
+  // transparent 는 셰이더 컴파일 시점에 반영된다(false 면 OPAQUE 로 컴파일돼 opacity 가
+  // 1.0 으로 고정). 바꿀 때마다 셰이더를 다시 만들게 해야 반투명이 실제로 적용된다.
+  material.needsUpdate = true;
+}
+
+/**
+ * 막힌 자세에서 상한을 넘겨 부품을 막은 장애물들의 dense index.
+ * 상한 이내의 겹침(is_over_limit=false)은 원래 맞물린 부분이라 원인이 아니다.
+ */
+function getBlockingObstacleIndexes(first_blocked_pose) {
+  if (first_blocked_pose === null) {
+    return [];
+  }
+  return first_blocked_pose.overlaps
+    .filter((overlap_entry) => overlap_entry.is_over_limit)
+    .map((overlap_entry) => overlap_entry.obstacle);
+}
+
+/**
+ * 겹침 메시의 꺾인 모서리를 굵은 선으로 덧그린다. 겹침 메시의 자식으로 붙여 겹침이
+ * 켜지고 꺼질 때 같이 따라간다. 겹침과 같이 깊이 검사를 끄고 겹침 바로 위에 그린다.
+ *
+ * @param viewport_size 화면 크기(CSS 픽셀). 굵기를 픽셀 단위로 계산하는 데 쓴다.
+ */
+function addOverlapOutline(overlap_mesh, overlap_color, viewport_size) {
+  const edges_geometry = new THREE.EdgesGeometry(
+    overlap_mesh.geometry,
+    OVERLAP_OUTLINE_THRESHOLD_DEGREES,
+  );
+  const outline_geometry = new LineSegmentsGeometry().fromEdgesGeometry(edges_geometry);
+  edges_geometry.dispose();
+
+  const outline_material = new LineMaterial({
+    color: new THREE.Color(overlap_color).offsetHSL(0, 0, OVERLAP_OUTLINE_LIGHTEN).getHex(),
+    linewidth: OVERLAP_OUTLINE_WIDTH_PIXELS,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
+    opacity: 1.0,
+  });
+  outline_material.resolution.copy(viewport_size);
+
+  const outline_line = new LineSegments2(outline_geometry, outline_material);
+  outline_line.renderOrder = 1000;
+  outline_line.userData.is_overlap_outline = true;
+  overlap_mesh.add(outline_line);
 }
 
 function getStateFromObject(object3d) {
@@ -740,17 +819,24 @@ export class AssemblyRenderer {
     this.stopFailureAnalysis();
     this._restoreInitialStates();
 
+    // 부품은 모두 반투명으로 낮춰 겹침이 어느 부품 속인지 읽히게 하고, 충돌에 관련된
+    // 부품(움직이는 부품 + 막은 부품)은 조금 더 진하게 둔다. 깊이는 계속 기록해 앞뒤가
+    // 뒤섞이지 않게 한다(setSolidMaterialLook 참고). 겹침 메시는 깊이 검사를 끄고
+    // 마지막에 그리므로 부품 속에 있어도 항상 보인다.
+    const focus_index_set = new Set([
+      solid_index,
+      ...getBlockingObstacleIndexes(first_blocked_pose),
+    ]);
     const visible_index_set = new Set(visible_solid_indexes);
     this._solid_meshes.forEach((solid_mesh, index) => {
       solid_mesh.visible = visible_index_set.has(index);
       if (!solid_mesh.visible) {
         return;
       }
-      // 겹침은 부품 속에 있다. 부품을 반투명으로 낮춰야 빨간 덩어리가 어느 부품
-      // 안쪽인지 읽힌다. depthWrite 를 끄지 않으면 반투명끼리 정렬이 깨진다.
-      solid_mesh.material.transparent = true;
-      solid_mesh.material.opacity = index === solid_index ? 0.45 : FAILURE_DIMMED_OPACITY;
-      solid_mesh.material.depthWrite = false;
+      setSolidMaterialLook(
+        solid_mesh.material,
+        focus_index_set.has(index) ? "focus" : "background",
+      );
     });
 
     const initial_state = this._initial_states[solid_index];
@@ -786,9 +872,7 @@ export class AssemblyRenderer {
 
     for (const solid_mesh of this._solid_meshes) {
       solid_mesh.visible = true;
-      solid_mesh.material.transparent = false;
-      solid_mesh.material.opacity = 1.0;
-      solid_mesh.material.depthWrite = true;
+      setSolidMaterialLook(solid_mesh.material, "opaque");
     }
     this._restoreInitialStates();
     this._clock.stop();
@@ -838,6 +922,7 @@ export class AssemblyRenderer {
       overlap_mesh.visible = false;
       overlap_mesh.userData.is_over_limit = is_over_limit;
       overlap_mesh.userData.is_shown = is_over_limit;
+      addOverlapOutline(overlap_mesh, material.color.getHex(), this._getViewportSize());
       this._scene.add(overlap_mesh);
       return overlap_mesh;
     });
@@ -848,6 +933,10 @@ export class AssemblyRenderer {
       this._scene.remove(overlap_mesh);
       overlap_mesh.geometry.dispose();
       overlap_mesh.material.dispose();
+      for (const outline_line of overlap_mesh.children) {
+        outline_line.geometry.dispose();
+        outline_line.material.dispose();
+      }
     }
     this._failure_analysis.overlap_meshes = [];
   }
@@ -1009,5 +1098,15 @@ export class AssemblyRenderer {
     this._camera.aspect = viewport_width / viewport_height;
     this._camera.updateProjectionMatrix();
     this._renderer.setSize(viewport_width, viewport_height);
+    // 굵은 선은 화면 크기로 픽셀 굵기를 계산하므로 창 크기가 바뀌면 같이 맞춘다.
+    for (const overlap_mesh of this._failure_analysis?.overlap_meshes ?? []) {
+      for (const outline_line of overlap_mesh.children) {
+        outline_line.material.resolution.copy(this._getViewportSize());
+      }
+    }
+  }
+
+  _getViewportSize() {
+    return this._renderer.getSize(new THREE.Vector2());
   }
 }
