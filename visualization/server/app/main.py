@@ -1,16 +1,17 @@
-"""STEP 처리 API 서버. 프론트엔드 Load STEP 요청을 받아 mesh msgpack을 반환한다."""
+"""Service 모드 API 서버 진입점. 앱을 만들고 미들웨어와 라우터를 붙인다."""
 
 import sys
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+from server.app.config import PROJECT_ROOT
 
-from server.app.api.routes import router
+# 팀 모듈(data/, core/, 루트 main.py)을 import 할 수 있게 프로젝트 루트를 맨 앞에 둔다.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from server.app.api.routes import router  # noqa: E402  (sys.path 설정 뒤에 import)
 
 app = FastAPI(title="Assembly Validation Pipeline")
 

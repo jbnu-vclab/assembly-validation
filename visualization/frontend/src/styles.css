@@ -643,3 +643,67 @@ body.is-dragging #drop-overlay {
     display: none;
   }
 }
+
+/* ── 모드 토글 · 헤더 액션 슬롯 (두 모드 공통) ───────────────── */
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  flex-shrink: 0;
+}
+
+.mode-toggle-button {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.mode-toggle-button.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.header-action-slot {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  justify-items: start;
+  min-width: 248px;
+  min-height: 36px;
+}
+
+.header-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  grid-area: 1 / 1;
+}
+
+.header-action-group.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Debug 모드에서는 요약 칩 · Export 를 숨기되 자리는 남겨 토글 위치를 고정한다. */
+body.debug-mode .summary-chip.is-ok,
+body.debug-mode .summary-chip.is-collision {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.debug-mode .header-actions {
+  visibility: hidden;
+  pointer-events: none;
+}

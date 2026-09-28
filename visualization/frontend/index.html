@@ -11,10 +11,9 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/src/styles.css" />
-    <!-- [서비스 모드][나중에 삭제] -->
     <link rel="stylesheet" href="/src/service_style.css" />
   </head>
-  <body>
+  <body class="debug-mode">
     <div id="app">
       <header id="app-header">
         <div class="brand-block">
@@ -22,7 +21,7 @@
         </div>
 
         <div class="header-summary">
-          <!-- [서비스 모드][나중에 삭제] 모드 토글 -->
+          <!-- 모드 토글 -->
           <div class="mode-toggle" role="group" aria-label="Mode toggle">
             <button id="debug-mode-button" class="mode-toggle-button is-active" type="button">Debug Mode</button>
             <button id="service-mode-button" class="mode-toggle-button" type="button">Service Mode</button>
@@ -39,7 +38,7 @@
         </div>
 
         <div class="header-actions">
-          <!-- [서비스 모드][나중에 삭제] 중간 액션 슬롯(너비 고정으로 Export 위치 유지) -->
+          <!-- Service 모드 액션 슬롯(너비 고정으로 Export 위치 유지) -->
           <div class="header-action-slot">
             <div id="service-actions" class="header-action-group hidden">
               <button id="open-button" class="btn" type="button">Load STEP</button>
