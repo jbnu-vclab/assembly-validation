@@ -47,4 +47,30 @@ python main.py step_path=<step_path.st*p> output_path=<output_path.msgpack>
         ├── action
             ├── type
             ├── value
+├── failures
+    ├── <id>
+        ├── closest_path
+            ├── <index>
+                ├── solid
+                ├── state
+                    ├── position
+                    ├── rotation
+                ├── action
+                    ├── type
+                    ├── value
+        ├── last_valid_pose
+            ├── state
+                ├── position
+                ├── rotation
+        ├── first_blocked_pose
+            ├── state
+                ├── position
+                ├── rotation
+            ├── overlaps
+                ├── <index>
+                    ├── obstacle
+                    ├── is_over_limit
+                    ├── mesh
+                        ├── vertices
+                        ├── faces
 ```
