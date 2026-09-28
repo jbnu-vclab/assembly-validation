@@ -82,51 +82,6 @@ input {
   min-width: 0;
 }
 
-.summary-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.summary-chip .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.summary-chip.is-ok .dot {
-  background: var(--success);
-  box-shadow: 0 0 0 3px rgba(62, 207, 142, 0.18);
-}
-
-.summary-chip.is-collision .dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 3px rgba(255, 92, 112, 0.18);
-}
-
-.summary-chip strong {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  min-width: 4.5ch;
-  display: inline-block;
-  text-align: left;
-}
-
-.header-actions {
-  display: grid;
-  grid-template-columns: minmax(248px, max-content) auto;
-  align-items: center;
-  column-gap: 8px;
-  justify-self: end;
-}
-
 .btn {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -312,7 +267,7 @@ input {
 }
 
 /* Load Assembly (기본 Debug 화면) */
-.debug-sidebar-actions {
+.sidebar-actions {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -322,7 +277,7 @@ input {
   flex-shrink: 0;
 }
 
-.debug-sidebar-actions.hidden {
+.sidebar-actions.hidden {
   display: none;
 }
 
@@ -638,13 +593,9 @@ body.is-dragging #drop-overlay {
     border-left: none;
     border-top: 1px solid var(--border);
   }
-
-  .header-summary .summary-chip {
-    display: none;
-  }
 }
 
-/* ── 모드 토글 · 헤더 액션 슬롯 (두 모드 공통) ───────────────── */
+/* ── 모드 토글 (두 모드 공통) ─────────────────────────────── */
 
 .mode-toggle {
   display: inline-flex;
@@ -673,37 +624,4 @@ body.is-dragging #drop-overlay {
 .mode-toggle-button.is-active {
   background: var(--accent);
   color: #fff;
-}
-
-.header-action-slot {
-  display: grid;
-  grid-template-columns: 1fr;
-  align-items: center;
-  justify-items: start;
-  min-width: 248px;
-  min-height: 36px;
-}
-
-.header-action-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  grid-area: 1 / 1;
-}
-
-.header-action-group.hidden {
-  visibility: hidden;
-  pointer-events: none;
-}
-
-/* Debug 모드에서는 요약 칩 · Export 를 숨기되 자리는 남겨 토글 위치를 고정한다. */
-body.debug-mode .summary-chip.is-ok,
-body.debug-mode .summary-chip.is-collision {
-  visibility: hidden;
-  pointer-events: none;
-}
-
-body.debug-mode .header-actions {
-  visibility: hidden;
-  pointer-events: none;
 }

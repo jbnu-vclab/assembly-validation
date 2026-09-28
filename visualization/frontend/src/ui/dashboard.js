@@ -70,8 +70,6 @@ export class ViewerDashboard {
 
     this._viewer_status = getRequiredElement("viewer-status");
     this._failure_report = getRequiredElement("failure-report");
-    this._summary_normal = getRequiredElement("summary-normal");
-    this._summary_collision = getRequiredElement("summary-collision");
     this._hud_frames = getRequiredElement("hud-frames");
     this._empty_state = getRequiredElement("empty-state");
     this._empty_state_title = getRequiredElement("empty-state-title");
@@ -88,10 +86,8 @@ export class ViewerDashboard {
     this._playback_status = getRequiredElement("playback-status");
     this._frame_label = getRequiredElement("frame-label");
     this._time_label = getRequiredElement("time-label");
-    this._export_button = getRequiredElement("export-button");
 
     this._bindPlaybackControls();
-    this._bindExportControl();
     this._assembly_renderer.setOnFrameChange((frame_state) => {
       this._syncPlaybackUi(frame_state);
     });
@@ -116,8 +112,6 @@ export class ViewerDashboard {
 
   resetWorkspace(idle_message) {
     this._clearLoadedAssembly();
-    this._summary_normal.textContent = "0/0";
-    this._summary_collision.textContent = "N/A";
     this._hud_frames.textContent = "Frames: 0";
     this._tree_count.textContent = "0 parts";
     this.showStage(
@@ -187,8 +181,6 @@ export class ViewerDashboard {
   _updateHeader(assembly_result, source_label) {
     const solid_count = assembly_result.solids.length;
     this._source_label = source_label;
-    this._summary_normal.textContent = `${solid_count}/${solid_count}`;
-    this._summary_collision.textContent = "N/A";
     this._hud_frames.textContent = `Frames: ${assembly_result.trajectories.length}`;
     this._tree_count.textContent = `${solid_count} parts`;
   }
@@ -471,19 +463,6 @@ export class ViewerDashboard {
     });
     this._timeline_slider.addEventListener("pointerup", () => {
       this._is_slider_dragging = false;
-    });
-  }
-
-  _bindExportControl() {
-    this._export_button.addEventListener("click", () => {
-      if (this._assembly_result === null) {
-        this._setViewerStatus("내보낼 조립 결과가 없습니다", false);
-        return;
-      }
-      this._setViewerStatus(
-        "Export Report는 충돌 리포트 스키마 확정 후 연결 예정입니다",
-        false,
-      );
     });
   }
 }

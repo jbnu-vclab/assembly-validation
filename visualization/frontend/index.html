@@ -26,28 +26,6 @@
             <button id="debug-mode-button" class="mode-toggle-button is-active" type="button">Debug Mode</button>
             <button id="service-mode-button" class="mode-toggle-button" type="button">Service Mode</button>
           </div>
-
-          <div class="summary-chip is-ok">
-            <span class="dot"></span>
-            <span>정상 부품 <strong id="summary-normal">0/0</strong></span>
-          </div>
-          <div class="summary-chip is-collision">
-            <span class="dot"></span>
-            <span>충돌 감지 <strong id="summary-collision">—</strong></span>
-          </div>
-        </div>
-
-        <div class="header-actions">
-          <!-- Service 모드 액션 슬롯(너비 고정으로 Export 위치 유지) -->
-          <div class="header-action-slot">
-            <div id="service-actions" class="header-action-group hidden">
-              <button id="open-button" class="btn" type="button">Load STEP</button>
-              <button id="assemble-button" class="btn btn-primary" type="button" disabled>조립 계산</button>
-            </div>
-          </div>
-
-          <button id="export-button" class="btn" type="button">Export Report</button>
-          <input id="file-input" type="file" accept=".step,.stp,model/step" hidden />
         </div>
       </header>
 
@@ -88,7 +66,7 @@
         </section>
 
         <aside id="sidebar">
-          <div id="debug-actions" class="debug-sidebar-actions">
+          <div id="debug-actions" class="sidebar-actions">
             <button id="load-assembly-button" class="btn btn-primary" type="button">Load Assembly</button>
             <span class="debug-bug" title="Debug Mode" aria-hidden="true">
               <svg viewBox="0 0 64 64" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
@@ -111,6 +89,13 @@
               </svg>
             </span>
             <input id="assembly-file-input" type="file" accept=".msgpack,application/octet-stream" hidden />
+          </div>
+
+          <!-- Service 모드: Debug 의 Load Assembly 자리에 Load STEP · 조립 계산 -->
+          <div id="service-actions" class="sidebar-actions hidden">
+            <button id="open-button" class="btn btn-primary" type="button">Load STEP</button>
+            <button id="assemble-button" class="btn" type="button" disabled>조립 계산</button>
+            <input id="file-input" type="file" accept=".step,.stp,model/step" hidden />
           </div>
 
           <section class="sidebar-section">
