@@ -7,7 +7,7 @@
  */
 
 import { AssemblyRenderer } from "./renderer.js";
-import { BASE_FRAME_DURATION_SECONDS, ViewerDashboard } from "./ui/dashboard.js";
+import { ViewerDashboard } from "./ui/dashboard.js";
 import { getRequiredElement } from "./ui/dom.js";
 import { createDebugMode } from "./modes/debug_mode.js";
 import { createServiceMode } from "./modes/service_mode.js";
@@ -42,10 +42,7 @@ function bindFileDrop(getActiveMode, viewer_dashboard) {
 }
 
 function main() {
-  const assembly_renderer = new AssemblyRenderer(
-    getRequiredElement("viewport"),
-    BASE_FRAME_DURATION_SECONDS,
-  );
+  const assembly_renderer = new AssemblyRenderer(getRequiredElement("viewport"));
   const viewer_dashboard = new ViewerDashboard(assembly_renderer);
   const drop_overlay = getRequiredElement("drop-overlay");
 

@@ -19,13 +19,7 @@ import {
   getSolidPartIndex,
 } from "./format.js";
 
-export const BASE_FRAME_DURATION_SECONDS = 1.0;
-
 const PLAYBACK_SPEED_MULTIPLIERS = [0.25, 0.5, 1, 2];
-
-function getFrameDurationForSpeed(speed_multiplier) {
-  return BASE_FRAME_DURATION_SECONDS / speed_multiplier;
-}
 
 function getMovingSolidIndexSet(trajectories) {
   return new Set(trajectories.map((trajectory_frame) => trajectory_frame.solid));
@@ -73,7 +67,6 @@ export class ViewerDashboard {
     this._has_assembly_plan = false;
     this._selected_solid_index = null;
     this._is_slider_dragging = false;
-    this._playback_speed_multiplier = 1;
 
     this._viewer_status = getRequiredElement("viewer-status");
     this._failure_report = getRequiredElement("failure-report");
@@ -156,16 +149,7 @@ export class ViewerDashboard {
     this._assembly_renderer.loadAssembly(assembly_result);
     this._updateHeader(assembly_result, source_label);
     this._renderPartTree(assembly_result);
-    const frame_duration_seconds = this._assembly_renderer.getFrameDurationSeconds();
-    this._syncPlaybackUi({
-      playback_position: 0,
-      playback_time_seconds: 0,
-      total_duration_seconds:
-        assembly_result.trajectories.length * frame_duration_seconds,
-      frame_count: assembly_result.trajectories.length,
-      is_playing: false,
-      frame_duration_seconds,
-    });
+    this._syncPlaybackUi(this._assembly_renderer.getFrameState());
   }
 
   _clearLoadedAssembly() {
@@ -177,14 +161,7 @@ export class ViewerDashboard {
   }
 
   _syncIdlePlaybackUi() {
-    this._syncPlaybackUi({
-      playback_position: 0,
-      playback_time_seconds: 0,
-      total_duration_seconds: 0,
-      frame_count: 0,
-      is_playing: false,
-      frame_duration_seconds: this._assembly_renderer.getFrameDurationSeconds(),
-    });
+    this._syncPlaybackUi(this._assembly_renderer.getFrameState());
   }
 
   _setViewerStatus(message, is_busy) {
@@ -427,8 +404,8 @@ export class ViewerDashboard {
       playback_time_seconds,
       total_duration_seconds,
       frame_count,
+      active_frame_number,
       is_playing,
-      frame_duration_seconds,
     } = frame_state;
 
     if (!this._is_slider_dragging) {
@@ -436,15 +413,7 @@ export class ViewerDashboard {
       this._timeline_slider.value = String(playback_time_seconds);
     }
 
-    const active_frame =
-      frame_count === 0 || playback_time_seconds <= 0
-        ? 0
-        : Math.min(
-            Math.ceil(playback_time_seconds / frame_duration_seconds),
-            frame_count,
-          );
-
-    this._frame_label.textContent = `Frame ${active_frame} / ${frame_count}`;
+    this._frame_label.textContent = `Frame ${active_frame_number} / ${frame_count}`;
     this._time_label.textContent =
       `${formatClockTime(playback_time_seconds)} / ${formatClockTime(total_duration_seconds)}`;
     this._playback_status.textContent = is_playing
@@ -454,24 +423,23 @@ export class ViewerDashboard {
         : "대기";
     this._play_button.disabled = is_playing || frame_count === 0;
     this._pause_button.disabled = !is_playing;
-    this._playback_speed_button.textContent = formatPlaybackSpeedLabel(
-      this._playback_speed_multiplier,
+    const speed_label = formatPlaybackSpeedLabel(
+      this._assembly_renderer.getPlaybackSpeedMultiplier(),
     );
-    this._playback_speed_button.title =
-      `배속 ${formatPlaybackSpeedLabel(this._playback_speed_multiplier)}`;
+    this._playback_speed_button.textContent = speed_label;
+    this._playback_speed_button.title = `배속 ${speed_label}`;
   }
 
   _cyclePlaybackSpeed() {
     const current_index = PLAYBACK_SPEED_MULTIPLIERS.indexOf(
-      this._playback_speed_multiplier,
+      this._assembly_renderer.getPlaybackSpeedMultiplier(),
     );
     const next_index =
       current_index < 0
         ? 0
         : (current_index + 1) % PLAYBACK_SPEED_MULTIPLIERS.length;
-    this._playback_speed_multiplier = PLAYBACK_SPEED_MULTIPLIERS[next_index];
-    this._assembly_renderer.setFrameDurationSeconds(
-      getFrameDurationForSpeed(this._playback_speed_multiplier),
+    this._assembly_renderer.setPlaybackSpeedMultiplier(
+      PLAYBACK_SPEED_MULTIPLIERS[next_index],
     );
   }
 

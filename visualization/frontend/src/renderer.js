@@ -6,10 +6,14 @@
  * (core/state.py 는 대문자 "XYZ" = intrinsic 이다. 소문자 "xyz" = extrinsic 으로 읽고
  *  three.js "ZYX" 로 매핑하면 역순이 되어 4 가지 시험 자세 모두 어긋난다.)
  *
- * playback_time_seconds: 연속 재생 시각.
- *   0 = 초기 분해 자세,
- *   k * frame_duration = trajectories[0..k-1] 적용 완료,
- *   그 사이는 현재 프레임을 보간한다.
+ * 재생 시간표: 프레임(= 한 부품의 한 방향 구간)마다 길이가 다르다.
+ *   병진 프레임 = 이동 거리 / TRANSLATION_SPEED_UNITS_PER_SECOND  (모든 구간이 같은 속도)
+ *   회전 프레임 = ROTATION_FRAME_SECONDS                          (거리 개념이 없어 고정)
+ * 프레임 k 는 [frame_start_times[k], frame_end_times[k]) 동안 선형(등속)으로 보간한다.
+ *
+ * _timeline_seconds 는 1배속 기준 시각이다. 배속은 시계가 흐르는 빠르기만 바꾸므로
+ * 시간표를 다시 계산하지 않는다. 밖으로 내보내는 시각(getPlaybackTimeSeconds 등)은
+ * 배속을 반영한 실제 재생 시간이다.
  */
 
 import * as THREE from "three";
@@ -46,6 +50,10 @@ const CULPRIT_OVERLAP_COLOR = 0xff4d4d;
 const CONTACT_OVERLAP_COLOR = 0x5aa9ff;
 // 분석 중 나머지 부품을 반투명으로 낮춰 겹침이 어느 부품 속인지 보이게 한다.
 const FAILURE_DIMMED_OPACITY = 0.22;
+
+// 궤적 재생 속도(1배속). 이탈 거리 400(main.py ESCAPE_DISTANCE)이 1초가 되도록 잡았다.
+const TRANSLATION_SPEED_UNITS_PER_SECOND = 400;
+const ROTATION_FRAME_SECONDS = 0.5;
 
 // 백엔드 State 의 회전 규약. scipy "XYZ" intrinsic 과 three.js "XYZ" 가 같은 곱 순서다.
 const STATE_EULER_ORDER = "XYZ";
@@ -131,20 +139,21 @@ const INTERPOLATED_EULER = new THREE.Euler();
 
 /**
  * 두 상태 사이를 보간한다. 위치는 선형, 자세는 사원수 구면 보간(slerp)이다.
+ * alpha 를 그대로 쓰므로 등속이다. 가감속이 필요하면 호출하는 쪽이 getEasedAlpha 를 씌운다.
  *
  * 오일러 성분을 따로 선형 보간하면 같은 자세로 도착하더라도 중간에 실재하지 않는
  * 방향으로 휘고, 특정 조합에서는 짐벌락으로 축이 무너진다. 백엔드 플래너도 회전 구간
  * 검사에 scipy Slerp 를 쓰므로(core/planner.py) 같은 방식으로 맞춘다.
  */
 function interpolateState(start_state, end_state, alpha) {
-  const eased_alpha = getEasedAlpha(alpha);
+  const clamped_alpha = Math.max(0, Math.min(1, alpha));
   const position = [
     start_state.position[0]
-      + (end_state.position[0] - start_state.position[0]) * eased_alpha,
+      + (end_state.position[0] - start_state.position[0]) * clamped_alpha,
     start_state.position[1]
-      + (end_state.position[1] - start_state.position[1]) * eased_alpha,
+      + (end_state.position[1] - start_state.position[1]) * clamped_alpha,
     start_state.position[2]
-      + (end_state.position[2] - start_state.position[2]) * eased_alpha,
+      + (end_state.position[2] - start_state.position[2]) * clamped_alpha,
   ];
 
   const has_same_rotation = start_state.rotation[0] === end_state.rotation[0]
@@ -168,7 +177,7 @@ function interpolateState(start_state, end_state, alpha) {
   );
   START_QUATERNION.setFromEuler(START_EULER);
   END_QUATERNION.setFromEuler(END_EULER);
-  START_QUATERNION.slerp(END_QUATERNION, eased_alpha);
+  START_QUATERNION.slerp(END_QUATERNION, clamped_alpha);
   INTERPOLATED_EULER.setFromQuaternion(START_QUATERNION, STATE_EULER_ORDER);
 
   return {
@@ -179,6 +188,28 @@ function interpolateState(start_state, end_state, alpha) {
       THREE.MathUtils.radToDeg(INTERPOLATED_EULER.z),
     ],
   };
+}
+
+/** 프레임 하나를 1배속으로 재생하는 시간. 병진은 거리에 비례해 모든 구간이 같은 속도가 된다. */
+function getFrameDurationSeconds(trajectory_frame) {
+  if (trajectory_frame.action.type === "rotation") {
+    return ROTATION_FRAME_SECONDS;
+  }
+  const [delta_x, delta_y, delta_z] = trajectory_frame.action.value;
+  return Math.hypot(delta_x, delta_y, delta_z) / TRANSLATION_SPEED_UNITS_PER_SECOND;
+}
+
+/** 프레임마다 [시작, 끝) 시각(1배속)을 누적해 시간표를 만든다. */
+function buildFrameTimetable(trajectory_frames) {
+  const frame_start_times = [];
+  const frame_end_times = [];
+  let elapsed_seconds = 0;
+  for (const trajectory_frame of trajectory_frames) {
+    frame_start_times.push(elapsed_seconds);
+    elapsed_seconds += getFrameDurationSeconds(trajectory_frame);
+    frame_end_times.push(elapsed_seconds);
+  }
+  return { frame_start_times, frame_end_times };
 }
 
 function getBoundingBoxCenter(global_bbox) {
@@ -196,26 +227,24 @@ function getBoundingBoxDiagonal(global_bbox) {
 }
 
 export class AssemblyRenderer {
-  constructor(viewport_element, frame_duration_seconds) {
+  constructor(viewport_element) {
     if (!(viewport_element instanceof HTMLElement)) {
       throw new AssemblyRenderException("viewport_element must be an HTMLElement");
     }
-    if (frame_duration_seconds <= 0) {
-      throw new AssemblyRenderException(
-        `frame_duration_seconds must be positive, received ${frame_duration_seconds}`,
-      );
-    }
 
     this._viewport_element = viewport_element;
-    this._frame_duration_seconds = frame_duration_seconds;
+    this._playback_speed_multiplier = 1;
     this._solid_meshes = [];
     this._initial_states = [];
     this._trajectory_frames = [];
     this._all_trajectory_frames = [];
+    this._frame_start_times = [];
+    this._frame_end_times = [];
     this._global_bbox = null;
+    // 적용을 마친 프레임 수. 프레임 k 가 보간 중이면 k 다.
     this._playback_position = 0;
-    this._elapsed_seconds = 0;
-    this._playback_range_end_seconds = null;
+    this._timeline_seconds = 0;
+    this._playback_range_end_timeline_seconds = null;
     this._is_playing = false;
     this._active_transition = null;
     this._on_frame_change = null;
@@ -277,9 +306,13 @@ export class AssemblyRenderer {
     const { metadata, solids, trajectories } = assembly_result;
     this._all_trajectory_frames = trajectories;
     this._trajectory_frames = trajectories;
+    ({
+      frame_start_times: this._frame_start_times,
+      frame_end_times: this._frame_end_times,
+    } = buildFrameTimetable(trajectories));
     this._global_bbox = metadata.global_bbox;
     this._playback_position = 0;
-    this._elapsed_seconds = 0;
+    this._timeline_seconds = 0;
     this._active_transition = null;
     this._initial_states = solids.map((solid_entry) => solid_entry.state);
 
@@ -312,7 +345,7 @@ export class AssemblyRenderer {
     this._clearSolids();
     this._global_bbox = null;
     this._playback_position = 0;
-    this._elapsed_seconds = 0;
+    this._timeline_seconds = 0;
     if (this._grid_helper !== null) {
       this._scene.remove(this._grid_helper);
       this._grid_helper.geometry.dispose();
@@ -340,41 +373,59 @@ export class AssemblyRenderer {
     return this._playback_position;
   }
 
+  /** 배속을 반영한 현재 재생 시각(초). */
   getPlaybackTimeSeconds() {
-    return (
-      this._playback_position * this._frame_duration_seconds + this._elapsed_seconds
-    );
+    return this._timeline_seconds / this._playback_speed_multiplier;
   }
 
+  /** 배속을 반영한 전체 재생 시간(초). */
   getTotalDurationSeconds() {
-    return this._trajectory_frames.length * this._frame_duration_seconds;
+    return this._getTotalTimelineSeconds() / this._playback_speed_multiplier;
   }
 
-  getFrameDurationSeconds() {
-    return this._frame_duration_seconds;
+  /**
+   * 화면에 "Frame k / N" 으로 보여줄 k. 0 이면 시작 전, 프레임 k 를 보간 중이거나 막
+   * 끝냈으면 k(1부터)다.
+   */
+  getActiveFrameNumber() {
+    const frame_count = this._trajectory_frames.length;
+    if (frame_count === 0 || this._timeline_seconds <= 0) {
+      return 0;
+    }
+    const is_inside_next_frame = this._playback_position < frame_count
+      && this._timeline_seconds > this._frame_start_times[this._playback_position];
+    return Math.min(this._playback_position + (is_inside_next_frame ? 1 : 0), frame_count);
   }
 
-  setFrameDurationSeconds(frame_duration_seconds) {
-    if (!(frame_duration_seconds > 0)) {
+  getPlaybackSpeedMultiplier() {
+    return this._playback_speed_multiplier;
+  }
+
+  /** 배속은 시계가 흐르는 빠르기만 바꾼다. 현재 자세와 시간표는 그대로다. */
+  setPlaybackSpeedMultiplier(speed_multiplier) {
+    if (!(speed_multiplier > 0)) {
       throw new AssemblyRenderException(
-        `frame_duration_seconds must be positive, received ${frame_duration_seconds}`,
+        `speed_multiplier must be positive, received ${speed_multiplier}`,
       );
     }
-
-    const previous_duration = this._frame_duration_seconds;
-    const frame_progress =
-      previous_duration > 0 ? this._elapsed_seconds / previous_duration : 0;
-
-    if (this._playback_range_end_seconds !== null && previous_duration > 0) {
-      const range_end_in_frames =
-        this._playback_range_end_seconds / previous_duration;
-      this._playback_range_end_seconds =
-        range_end_in_frames * frame_duration_seconds;
-    }
-
-    this._frame_duration_seconds = frame_duration_seconds;
-    this._elapsed_seconds = frame_progress * frame_duration_seconds;
+    this._playback_speed_multiplier = speed_multiplier;
     this._notifyFrameChange();
+  }
+
+  getFrameState() {
+    return {
+      playback_position: this._playback_position,
+      playback_time_seconds: this.getPlaybackTimeSeconds(),
+      total_duration_seconds: this.getTotalDurationSeconds(),
+      frame_count: this._trajectory_frames.length,
+      active_frame_number: this.getActiveFrameNumber(),
+      is_playing: this._is_playing,
+    };
+  }
+
+  _getTotalTimelineSeconds() {
+    const frame_count = this._frame_end_times.length;
+    return frame_count === 0 ? 0 : this._frame_end_times[frame_count - 1];
   }
 
   isPlaying() {
@@ -396,8 +447,8 @@ export class AssemblyRenderer {
     if (this._trajectory_frames.length === 0) {
       return;
     }
-    if (this.getPlaybackTimeSeconds() >= this.getTotalDurationSeconds()) {
-      this.seekToTime(0);
+    if (this._timeline_seconds >= this._getTotalTimelineSeconds()) {
+      this._seekToTimelineSeconds(0);
     }
     this._is_playing = true;
     this._clock.start();
@@ -426,15 +477,13 @@ export class AssemblyRenderer {
       return false;
     }
 
-    const range_start_seconds =
-      solid_frame_indexes[0] * this._frame_duration_seconds;
+    const range_start_seconds = this._frame_start_times[solid_frame_indexes[0]];
     const range_end_seconds =
-      (solid_frame_indexes[solid_frame_indexes.length - 1] + 1)
-      * this._frame_duration_seconds;
+      this._frame_end_times[solid_frame_indexes[solid_frame_indexes.length - 1]];
 
     this.pause();
-    this._playback_range_end_seconds = range_end_seconds;
-    this.seekToTime(range_start_seconds);
+    this._seekToTimelineSeconds(range_start_seconds);
+    this._playback_range_end_timeline_seconds = range_end_seconds;
     this._is_playing = true;
     this._clock.start();
     this._notifyFrameChange();
@@ -455,55 +504,62 @@ export class AssemblyRenderer {
     this.seekToTime(0);
   }
 
+  /** 배속을 반영한 재생 시각(초)으로 이동한다. 타임라인 슬라이더가 이 값을 쓴다. */
   seekToTime(playback_time_seconds) {
-    this.stopFailureAnalysis();
     if (!Number.isFinite(playback_time_seconds)) {
       throw new AssemblyRenderException(
         `playback_time_seconds must be a finite number, received ${playback_time_seconds}`,
       );
     }
+    this._seekToTimelineSeconds(playback_time_seconds * this._playback_speed_multiplier);
+  }
 
+  /** 1배속 시간표 기준 시각으로 이동한다. 초기 자세부터 다시 적용한다. */
+  _seekToTimelineSeconds(timeline_seconds) {
+    this.stopFailureAnalysis();
     this._restoreFullTrajectoryPlaylist();
-    const total_duration_seconds = this.getTotalDurationSeconds();
-    const clamped_time = Math.max(
+    this._timeline_seconds = Math.max(
       0,
-      Math.min(playback_time_seconds, total_duration_seconds),
+      Math.min(timeline_seconds, this._getTotalTimelineSeconds()),
     );
 
     this._restoreInitialStates();
     this._active_transition = null;
-
-    if (total_duration_seconds === 0 || clamped_time <= 0) {
-      this._playback_position = 0;
-      this._elapsed_seconds = 0;
-      this._notifyFrameChange();
-      return;
-    }
-
-    if (clamped_time >= total_duration_seconds) {
-      for (const trajectory_frame of this._trajectory_frames) {
-        this._applyTrajectoryFrame(trajectory_frame);
-      }
-      this._playback_position = this._trajectory_frames.length;
-      this._elapsed_seconds = 0;
-      this._notifyFrameChange();
-      return;
-    }
-
-    const completed_frame_count = Math.floor(
-      clamped_time / this._frame_duration_seconds,
-    );
-    for (let frame_index = 0; frame_index < completed_frame_count; frame_index += 1) {
-      this._applyTrajectoryFrame(this._trajectory_frames[frame_index]);
-    }
-
-    this._playback_position = completed_frame_count;
-    this._elapsed_seconds = clamped_time - completed_frame_count * this._frame_duration_seconds;
-    this._beginTransitionToCurrentFrame();
-    this._applyInterpolatedTransition(
-      this._elapsed_seconds / this._frame_duration_seconds,
-    );
+    this._playback_position = 0;
+    this._applyFramesUpToTimeline();
     this._notifyFrameChange();
+  }
+
+  /**
+   * _timeline_seconds 까지 끝난 프레임을 적용하고, 걸쳐 있는 프레임은 등속으로 보간한다.
+   * 재생(_updateAnimation)과 이동(_seekToTimelineSeconds)이 같이 쓴다.
+   */
+  _applyFramesUpToTimeline() {
+    const frame_count = this._trajectory_frames.length;
+    while (
+      this._playback_position < frame_count
+      && this._frame_end_times[this._playback_position] <= this._timeline_seconds
+    ) {
+      this._applyTrajectoryFrame(this._trajectory_frames[this._playback_position]);
+      this._playback_position += 1;
+      this._active_transition = null;
+    }
+
+    if (this._playback_position >= frame_count) {
+      return;
+    }
+    const frame_start_seconds = this._frame_start_times[this._playback_position];
+    if (this._timeline_seconds <= frame_start_seconds) {
+      return;
+    }
+    if (this._active_transition === null) {
+      this._beginTransitionToCurrentFrame();
+    }
+    const frame_duration_seconds =
+      this._frame_end_times[this._playback_position] - frame_start_seconds;
+    this._applyInterpolatedTransition(
+      (this._timeline_seconds - frame_start_seconds) / frame_duration_seconds,
+    );
   }
 
   _restoreFullTrajectoryPlaylist() {
@@ -511,7 +567,7 @@ export class AssemblyRenderer {
   }
 
   _clearPlaybackRange() {
-    this._playback_range_end_seconds = null;
+    this._playback_range_end_timeline_seconds = null;
   }
 
   setSolidVisibility(solid_index, is_visible) {
@@ -550,55 +606,21 @@ export class AssemblyRenderer {
       return;
     }
 
-    this._elapsed_seconds += delta_seconds;
+    // 부품 구간 재생(playSolid)이면 그 구간 끝, 아니면 전체 끝에서 멈춘다.
+    const stop_timeline_seconds = this._playback_range_end_timeline_seconds
+      ?? this._getTotalTimelineSeconds();
+    this._timeline_seconds = Math.min(
+      this._timeline_seconds + delta_seconds * this._playback_speed_multiplier,
+      stop_timeline_seconds,
+    );
+    this._applyFramesUpToTimeline();
 
-    while (this._is_playing && this._playback_position < this._trajectory_frames.length) {
-      if (
-        this._playback_range_end_seconds !== null
-        && this.getPlaybackTimeSeconds() >= this._playback_range_end_seconds
-      ) {
-        this.seekToTime(this._playback_range_end_seconds);
-        this._clearPlaybackRange();
-        this.pause();
-        break;
-      }
-
-      if (this._active_transition === null) {
-        this._beginTransitionToCurrentFrame();
-      }
-
-      const transition_alpha = Math.min(
-        1,
-        this._elapsed_seconds / this._frame_duration_seconds,
-      );
-      this._applyInterpolatedTransition(transition_alpha);
-
-      if (this._elapsed_seconds < this._frame_duration_seconds) {
-        this._notifyFrameChange();
-        break;
-      }
-
-      this._applyTrajectoryFrame(this._trajectory_frames[this._playback_position]);
-      this._playback_position += 1;
-      this._elapsed_seconds -= this._frame_duration_seconds;
-      this._active_transition = null;
-
-      if (
-        this._playback_range_end_seconds !== null
-        && this.getPlaybackTimeSeconds() >= this._playback_range_end_seconds
-      ) {
-        this._clearPlaybackRange();
-        this.pause();
-        break;
-      }
-
-      if (this._playback_position >= this._trajectory_frames.length) {
-        this._elapsed_seconds = 0;
-        this._clearPlaybackRange();
-        this.pause();
-        break;
-      }
+    if (this._timeline_seconds >= stop_timeline_seconds) {
+      this._clearPlaybackRange();
+      this.pause();
+      return;
     }
+    this._notifyFrameChange();
   }
 
   _beginTransitionToCurrentFrame() {
@@ -921,7 +943,7 @@ export class AssemblyRenderer {
         interpolateState(
           failure_analysis.valid_state,
           failure_analysis.blocked_state,
-          phase_alpha,
+          getEasedAlpha(phase_alpha),
         ),
       );
     } else {
@@ -956,7 +978,7 @@ export class AssemblyRenderer {
     return interpolateState(
       start_state,
       path_frames[frame_index].state,
-      scaled_position - frame_index,
+      getEasedAlpha(scaled_position - frame_index),
     );
   }
 
@@ -970,19 +992,14 @@ export class AssemblyRenderer {
     this._initial_states = [];
     this._trajectory_frames = [];
     this._all_trajectory_frames = [];
+    this._frame_start_times = [];
+    this._frame_end_times = [];
     this._active_transition = null;
   }
 
   _notifyFrameChange() {
     if (typeof this._on_frame_change === "function") {
-      this._on_frame_change({
-        playback_position: this._playback_position,
-        playback_time_seconds: this.getPlaybackTimeSeconds(),
-        total_duration_seconds: this.getTotalDurationSeconds(),
-        frame_count: this._trajectory_frames.length,
-        is_playing: this._is_playing,
-        frame_duration_seconds: this._frame_duration_seconds,
-      });
+      this._on_frame_change(this.getFrameState());
     }
   }
 
