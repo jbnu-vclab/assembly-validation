@@ -155,6 +155,7 @@ export class ViewerDashboard {
     this._selected_solid_index = null;
     this._empty_state.classList.add("hidden");
     this._hideViewerStatus();
+    this._hideFailureReport();
 
     this._assembly_renderer.loadAssembly(assembly_result);
     this._updateHeader(assembly_result, source_label);
@@ -163,6 +164,8 @@ export class ViewerDashboard {
   }
 
   _clearLoadedAssembly() {
+    // 결과에 딸린 화면(실패 리포트 포함)은 결과와 함께 비운다. 모드 전환 · 새 파일 로드 모두 여기를 지난다.
+    this._hideFailureReport();
     this._assembly_renderer.clearAssembly();
     this._part_tree.replaceChildren();
     this._assembly_result = null;
