@@ -522,6 +522,11 @@ function getValidatedOverlapMesh(mesh_entry, field_name) {
 
 function getNormalizedOverlaps(overlaps_entry, part_index_to_dense_index, field_name) {
   // 겹침이 하나도 없는 자세가 실제로 존재한다(hair_dryer 의 fan). 빈 목록이 정상이다.
+  // overlaps 키가 없어도 빈 목록으로 본다(last_valid_pose 는 생략될 수 있다).
+  // 지금은 쓰지 않지만 나중에 조립 설계상 겹침 표시 등에 쓸 수 있어 형식은 유지한다.
+  if (overlaps_entry === undefined || overlaps_entry === null) {
+    return [];
+  }
   return getIndexedEntriesWithKeys(overlaps_entry, field_name).map(
     ({ key: overlap_index, entry: overlap_entry }) => {
       const overlap_field_name = `${field_name}[${overlap_index}]`;
