@@ -160,23 +160,6 @@ input {
   height: 100% !important;
 }
 
-#viewer-hud {
-  position: absolute;
-  left: 16px;
-  top: 16px;
-  z-index: 2;
-  padding: 10px 12px;
-  border: 1px solid rgba(90, 162, 255, 0.35);
-  border-radius: 10px;
-  background: rgba(36, 48, 68, 0.88);
-  backdrop-filter: blur(8px);
-  color: #d5e2f5;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.55;
-  pointer-events: none;
-}
-
 #viewer-status {
   position: absolute;
   top: 28px;

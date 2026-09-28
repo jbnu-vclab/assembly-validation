@@ -70,7 +70,6 @@ export class ViewerDashboard {
 
     this._viewer_status = getRequiredElement("viewer-status");
     this._failure_report = getRequiredElement("failure-report");
-    this._hud_frames = getRequiredElement("hud-frames");
     this._empty_state = getRequiredElement("empty-state");
     this._empty_state_title = getRequiredElement("empty-state-title");
     this._empty_state_body = getRequiredElement("empty-state-body");
@@ -112,7 +111,6 @@ export class ViewerDashboard {
 
   resetWorkspace(idle_message) {
     this._clearLoadedAssembly();
-    this._hud_frames.textContent = "Frames: 0";
     this._tree_count.textContent = "0 parts";
     this.showStage(
       "조립 결과가 없습니다",
@@ -200,7 +198,6 @@ export class ViewerDashboard {
   _updateHeader(assembly_result, source_label) {
     const solid_count = assembly_result.solids.length;
     this._source_label = source_label;
-    this._hud_frames.textContent = `Frames: ${assembly_result.trajectories.length}`;
     this._tree_count.textContent = `${solid_count} parts`;
   }
 
