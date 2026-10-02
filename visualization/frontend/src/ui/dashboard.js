@@ -83,7 +83,6 @@ export class ViewerDashboard {
     this._playback_speed_button = getRequiredElement("playback-speed-button");
     this._timeline_slider = getRequiredElement("timeline-slider");
     this._playback_status = getRequiredElement("playback-status");
-    this._frame_label = getRequiredElement("frame-label");
     this._time_label = getRequiredElement("time-label");
 
     this._bindPlaybackControls();
@@ -412,7 +411,6 @@ export class ViewerDashboard {
       playback_time_seconds,
       total_duration_seconds,
       frame_count,
-      active_frame_number,
       is_playing,
     } = frame_state;
 
@@ -421,7 +419,6 @@ export class ViewerDashboard {
       this._timeline_slider.value = String(playback_time_seconds);
     }
 
-    this._frame_label.textContent = `Frame ${active_frame_number} / ${frame_count}`;
     this._time_label.textContent =
       `${formatClockTime(playback_time_seconds)} / ${formatClockTime(total_duration_seconds)}`;
     this._playback_status.textContent = is_playing
