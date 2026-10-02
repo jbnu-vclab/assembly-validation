@@ -18,6 +18,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
@@ -66,6 +67,10 @@ const OVERLAP_OUTLINE_THRESHOLD_DEGREES = 30;
 const TRANSLATION_SPEED_UNITS_PER_SECOND = 400;
 const ROTATION_FRAME_SECONDS = 0.5;
 
+// 이웃한 두 면이 이 각도보다 크게 꺾이면 모서리로 보고 음영을 나눈다. 결과 메시를 재 보면
+// 곡면을 나눈 삼각형은 대부분 10° 미만, 실제 모서리는 30° 이상이라 그 사이로 잡았다.
+const SMOOTH_SHADING_MAX_ANGLE = THREE.MathUtils.degToRad(30);
+
 // 백엔드 State 의 회전 규약. scipy "XYZ" intrinsic 과 three.js "XYZ" 가 같은 곱 순서다.
 const STATE_EULER_ORDER = "XYZ";
 
@@ -107,8 +112,10 @@ function createSolidGeometry(mesh_entry) {
     new THREE.Float32BufferAttribute(position_values, 3),
   );
   geometry.setIndex(index_values);
-  geometry.computeVertexNormals();
-  return geometry;
+  // 꼭짓점을 공유한 채 법선을 평균하면 각진 모서리의 법선이 양쪽 면의 어중간한 방향이 되어
+  // 모서리 근처 음영이 둥글게 번진다. 이웃 면이 SMOOTH_SHADING_MAX_ANGLE 보다 크게 꺾인
+  // 모서리에서는 꼭짓점을 나눠 각진 곳은 각지게, 완만한 곡면은 부드럽게 그린다.
+  return toCreasedNormals(geometry, SMOOTH_SHADING_MAX_ANGLE);
 }
 
 function applyStateToObject(object3d, state) {
