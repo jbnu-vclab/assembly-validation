@@ -9,8 +9,3 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
 
 ALLOWED_STEP_SUFFIXES = {".step", ".stp"}
-
-# /load-step 미리보기용 STEPLoader 설정
-PREVIEW_FACE_TOLERANCE = 0.1
-PREVIEW_ANGLE_TOLERANCE = 0.1
-PREVIEW_MAX_WORKERS = 4
