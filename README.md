@@ -43,10 +43,9 @@ npm run dev
 │   │       ├── main.py : FastAPI entry (CORS, router)
 │   │       ├── config.py : paths and settings
 │   │       ├── api/
-│   │       │   ├── routes.py : endpoints only — /api/load-step, /api/assemble, /api/health
+│   │       │   ├── routes.py : endpoints only — /api/assemble, /api/health
 │   │       │   └── http_utils.py : upload storage (400 checks), msgpack response
 │   │       └── services/
-│   │           ├── step_service.py : STEP → mesh preview msgpack
 │   │           ├── assembly_service.py : STEP → RRT* result msgpack (calls root main.py pipeline)
 │   │           └── errors.py : service exceptions
 │   └── frontend/
@@ -58,8 +57,8 @@ npm run dev
 │           ├── main.js : entry — creates renderer, dashboard, modes and wires them (mode switch, file drop)
 │           ├── modes/
 │           │   ├── debug_mode.js : [debug] local result msgpack → result_loader (no server)
-│           │   └── service_mode.js : [service] STEP upload → api.js → preview / assembly result
-│           ├── api.js : server requests (POST /api/load-step, /api/assemble)
+│           │   └── service_mode.js : [service] STEP upload → api.js → assembly result (progress text on the viewer)
+│           ├── api.js : server requests (POST /api/assemble)
 │           ├── result_loader.js : result msgpack bytes → decode → normalize → validate (shared)
 │           ├── ui/
 │           │   ├── dashboard.js : ViewerDashboard — header, part tree, playback bar, failure report
@@ -75,9 +74,8 @@ npm run dev
 ## Pipeline (current)
 - **Debug 모드**: `python main.py ...` 로 만든 `output/*.msgpack` 을 브라우저에서 직접 로드 (서버 불필요)
 - **Service 모드**
-  1. **Load STEP** (`POST /api/load-step`, `step_file`): `STEPLoader` 파싱 → solids mesh msgpack (`trajectories=[]`) → 미리보기
-  2. **조립 계산** (`POST /api/assemble`, `step_file`): 루트 `main.py` 의 `execute_disassembly_search` 를 `config/config.yaml` 설정으로 실행 → 결과 msgpack
-     - `failures` 는 팀 exporter 가 main 에 합쳐지면 자동으로 포함된다 (프론트는 이미 지원)
+  - **Load STEP** (`POST /api/assemble`, `step_file`): 루트 `main.py` 의 `execute_disassembly_search` 가 STEP → Mesh · 간섭 판정 · 분해 경로 탐색을 `config/config.yaml` 설정으로 한 번에 실행 → 결과 msgpack → 결과 화면
+     - 분해 실패 부품의 진단(`failures`)도 함께 담겨 실패 분석 화면에 쓰인다
 
 ## Output Structure
 ```

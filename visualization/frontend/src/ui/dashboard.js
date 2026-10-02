@@ -1,7 +1,7 @@
 /**
  * ViewerDashboard: 3D 캔버스를 뺀 화면 전체(헤더 · 조립 트리 · 재생바 · 실패 리포트 · 상태 메시지).
  * 사용자 조작을 렌더러 명령으로 바꾸고, 렌더러의 재생 상태를 화면에 반영한다.
- * 데이터를 어디서 가져오는지는 모른다. 모드가 bindParsedStep / bindAssembly 로 넘겨준다.
+ * 데이터를 어디서 가져오는지는 모른다. 모드가 bindAssembly 로 넘겨준다.
  */
 
 import { AssemblyRenderException } from "../renderer.js";
@@ -56,7 +56,7 @@ function getSolidIndexesInTrajectoryOrder(solids, trajectories) {
 
 /**
  * 두 모드가 공유하는 화면. 모드 모듈은 아래 공개 메서드만 부른다.
- *   showBusy / showStage / showError / resetWorkspace / bindParsedStep / bindAssembly
+ *   showBusy / showStage / updateStage / showError / resetWorkspace / bindAssembly
  */
 export class ViewerDashboard {
   constructor(assembly_renderer) {
@@ -95,6 +95,11 @@ export class ViewerDashboard {
     this._setViewerStatus(message, true);
   }
 
+  /** 가운데 안내 문구만 바꾼다. 진행 중인 단계를 갱신할 때 쓴다(결과는 비우지 않음). */
+  updateStage(title, body, pipeline) {
+    this._showEmptyState(title, body, pipeline);
+  }
+
   /** 결과를 비우고 가운데 안내(제목 / 본문 / 파이프라인 진행)를 띄운다. */
   showStage(title, body, pipeline) {
     this._clearLoadedAssembly();
@@ -116,34 +121,6 @@ export class ViewerDashboard {
       idle_message,
       "파싱 — · 경로 계산 — · 충돌 —",
     );
-  }
-
-  /** STEP 파싱 결과(메시만, 경로 없음). 조립 계산 전 단계라 3D 는 비워 둔다. */
-  bindParsedStep(loaded_step_result, source_label) {
-    this.showStage(
-      "파싱 완료",
-      "조립 계산 버튼을 눌러 시퀀스를 불러오세요",
-      "파싱 ✓ · 경로 계산 — · 충돌 —",
-    );
-    this._assembly_result = loaded_step_result;
-    this._has_assembly_plan = false;
-    this._updateHeader(loaded_step_result, source_label);
-    this._renderPartNameList(loaded_step_result);
-  }
-
-  /** 파싱 직후의 조립 트리. 3D 는 아직 비워 두므로 버튼 없이 부품 이름만 보여 준다. */
-  _renderPartNameList(loaded_step_result) {
-    this._part_tree.replaceChildren();
-    loaded_step_result.solids.forEach((solid_entry, solid_index) => {
-      const list_item = document.createElement("li");
-      list_item.className = "part-item is-preview";
-      const part_name = document.createElement("span");
-      part_name.className = "part-name";
-      part_name.textContent = formatPartLabel(solid_entry, solid_index);
-      part_name.title = part_name.textContent;
-      list_item.append(part_name);
-      this._part_tree.append(list_item);
-    });
   }
 
   bindAssembly(assembly_result, source_label) {
