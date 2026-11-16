@@ -1,42 +1,9 @@
-"""분해(disassembly) 경로를 탐색하는 RRT* 경로 계획 모듈.
-
-이미 조립된 상태의 부품 하나(moving solid)를 나머지 부품들(고정 장애물) 사이에서
-빼내는 충돌 없는 경로를 RRT*(Rapidly-exploring Random Tree Star)로 탐색한다.
-탐색으로 얻은 분해 경로를 뒤집으면 최적 조립 경로가 된다(to_assembly_path).
-
-상태 공간(hybrid)
------------------
-- 위치(position): 연속 실수 좌표 (x, y, z) in R^3.
-- 회전(rotation): 이산 자세. {0,90,180,270} 각도 격자(64가지)를 회전 행렬로 환산하면
-  서로 겹쳐 실제로는 24가지 고유 자세(정팔면체 회전군)만 존재한다. 서로 다른 오일러
-  삼중항이 같은 자세를 나타내므로, 노드 중복 판정·목표 판정·재배선은 오일러 튜플이
-  아니라 회전 '행렬'을 기준으로 비교하고, 각 고유 자세를 대표 오일러 하나로 정규화한다.
-
-간선(edge) 모델
----------------
-임의의 두 상태 A, B 사이의 이동은 최대 두 개의 단위 동작으로 분해한다(core.action 규약:
-단위 동작은 이동 또는 회전 중 하나).
-1. 회전 동작: A 의 자세를 B 의 자세로 바꾼다. 회전은 부품 자신의 '월드 무게중심'을
-   기준으로 수행한다(core.action 이 남긴 무게중심 보정은 planner 몫이라는 규약을 따름).
-   이산 자세 재배치이므로 결과 상태만 is_valid_state 로 검사한다.
-2. 이동 동작: 회전 후 위치에서 B 의 위치까지 직선 이동한다. 연속 이동이므로
-   is_path_segment_valid 로 구간 전체를 표본 검사한다(터널링 방지).
-
-목표(goal)
-----------
-움직이는 부품의 월드 축정렬 경계상자(AABB)가 나머지 부품 전체의 AABB 로부터 여유값
-이상 떨어지면(어느 한 축에서 분리) 부품이 조립체 밖으로 '추출'된 것으로 본다. 닫히지
-않은(non-watertight) 메쉬에서도 안정적으로 판정할 수 있는 기하 기준이다.
-
-충돌 판정
----------
-판정 자체는 core.interference 가 하고, 이 모듈의 InterferenceSessionAdapter 가 State 를
-4x4 변환으로 번역해 넘긴다. planner 는 어댑터의 세 메서드만 쓰므로 판정 근거를 바꾸어도
-탐색 코드는 그대로다.
-"""
-
+# RRT* 기반 분해 경로 탐색.
+# 움직이는 부품 하나를 조립 상태에서 출발시켜, 위치는 연속 공간에서, 회전은 24개 이산 자세 중에서
+# 샘플링하며 트리를 키운다. 나머지 부품 전체의 경계 상자에서 목표 여유 이상 떨어진 상태에 닿으면
+# 분해된 것으로 본다.
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -47,21 +14,17 @@ from core.interference import InterferenceException, InterferenceSession
 from core.state import State
 
 
+# 탐색 입력이나 설정이 잘못되었을 때 발생시키는 예외
 class PlanningException(Exception):
-    """경로 계획기의 입력·구성이 규약을 벗어날 때 발생."""
+    pass
 
 
+# 축마다 쓰는 회전 각도(도). 4^3 = 64개 조합이 서로 다른 회전 행렬 24개로 모인다.
 _ROTATION_GRID_ANGLES = (0, 90, 180, 270)
 
 
+# 90도 단위 XYZ intrinsic 오일러 각을 성분이 -1/0/1인 회전 행렬로 바꾼다.
 def _to_grid_rotation_matrix(euler_angles: Tuple[int, int, int]) -> np.ndarray:
-    """격자 오일러 각도(90도 배수)를 성분이 {-1,0,1}로 확정된 회전 행렬로 변환한다.
-
-    회전 규약은 state.py / action.py 와 반드시 동일해야 한다(scipy 'XYZ' intrinsic).
-    planner 는 회전 행렬을 24가지 대표 오일러로 정규화해 State.rotation 에 저장하는데,
-    State.to_rotation_matrix() 가 이 오일러를 다시 행렬로 해석하므로 규약이 어긋나면
-    (예: 'xyz' extrinsic) 저장한 자세가 다른 자세로 재해석된다(격자 64개 중 40개 불일치).
-    """
     rotation_matrix = np.rint(
         Rotation.from_euler("XYZ", euler_angles, degrees=True).as_matrix()
     )
@@ -69,13 +32,14 @@ def _to_grid_rotation_matrix(euler_angles: Tuple[int, int, int]) -> np.ndarray:
     return rotation_matrix
 
 
+# 회전 행렬을 정수 튜플로 바꿔 사전 키로 쓴다.
 def _to_matrix_key(rotation_matrix: np.ndarray) -> Tuple[int, ...]:
-    """회전 행렬을 정수 키(딕셔너리 조회용)로 변환한다."""
     return tuple(np.rint(rotation_matrix).astype(int).flatten())
 
 
+# 64개 오일러 조합을 돌며 회전 행렬마다 처음 나온 오일러 각을 대표값으로 정한다.
+# 반환: (행렬 키 → 대표 오일러 각, 대표 오일러 각 24개 목록)
 def _build_canonical_rotation_lookup() -> Tuple[Dict[Tuple[int, ...], Tuple[int, int, int]], List[Tuple[int, int, int]]]:
-    """24가지 고유 회전 자세의 (행렬키 -> 대표 오일러) 조회표와 대표 오일러 목록을 만든다."""
     matrix_key_to_euler: Dict[Tuple[int, ...], Tuple[int, int, int]] = dict()
     canonical_eulers: List[Tuple[int, int, int]] = list()
     for euler_angles in itertools.product(_ROTATION_GRID_ANGLES, repeat=3):
@@ -86,30 +50,27 @@ def _build_canonical_rotation_lookup() -> Tuple[Dict[Tuple[int, ...], Tuple[int,
     return matrix_key_to_euler, canonical_eulers
 
 
-# 24가지 고유 자세 조회표를 모듈 적재 시 한 번만 구축한다.
+# 모듈을 불러올 때 한 번 만드는 조회표
 _MATRIX_KEY_TO_EULER, _CANONICAL_ROTATION_EULERS = _build_canonical_rotation_lookup()
 
-# 오일러 3-tuple -> 대표 오일러 조회표. 격자 조합 4^3 = 64 가지를 회전행렬로 중복 제거하면
-# 24 가지다((0,90,90) 과 (90,0,90) 은 같은 회전). 오일러 tuple 을 그대로 비교하면 같은
-# 회전을 다르다고 오판하므로 대표 오일러로 정규화한 뒤 비교한다.
+# 64개 오일러 조합 → 같은 회전의 대표 오일러 각
 _EULER_TO_CANONICAL: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {
     euler_angles: _MATRIX_KEY_TO_EULER[_to_matrix_key(_to_grid_rotation_matrix(euler_angles))]
     for euler_angles in itertools.product(_ROTATION_GRID_ANGLES, repeat=3)
 }
 
 
+# 90도 단위 오일러 각(360으로 나눈 나머지로 정규화)을 대표 오일러 각으로 바꾼다.
 def _to_canonical_rotation(rotation: Tuple[int, int, int]) -> Tuple[int, int, int]:
-    """오일러 3-tuple 을 같은 회전을 나타내는 대표 오일러로 정규화한다."""
     rotation_key = tuple(int(component) % 360 for component in rotation)
     canonical = _EULER_TO_CANONICAL.get(rotation_key)
     if canonical is not None:
         return canonical
-    # 격자를 벗어난 값(90도 배수가 아님)은 조회표에 없다. 행렬로 직접 정규화한다.
     return _MATRIX_KEY_TO_EULER[_to_matrix_key(_to_grid_rotation_matrix(rotation_key))]
 
 
+# 회전 행렬을 대표 오일러 각으로 바꾼다. 90도 격자 자세가 아니면 예외.
 def _to_canonical_rotation_euler(rotation_matrix: np.ndarray) -> Tuple[int, int, int]:
-    """회전 행렬을 24가지 고유 자세의 대표 오일러 각도로 정규화한다."""
     matrix_key = _to_matrix_key(rotation_matrix)
     if matrix_key not in _MATRIX_KEY_TO_EULER:
         raise PlanningException(
@@ -118,49 +79,326 @@ def _to_canonical_rotation_euler(rotation_matrix: np.ndarray) -> Tuple[int, int,
     return _MATRIX_KEY_TO_EULER[matrix_key]
 
 
+# 여섯 방향(±x, ±y, ±z) 중 움직이는 부품이 장애물 경계 상자에서 가장 멀리 떨어진 방향.
+# 반환: (축 번호, 부호 -1/+1, 분리량)
+def get_axis_aligned_separation(
+    moving_world_vertices: np.ndarray, obstacle_bounding_box: np.ndarray
+) -> Tuple[int, int, float]:
+    separations = get_axis_separations(moving_world_vertices, obstacle_bounding_box)
+    flat_index = int(np.argmax(separations))
+    axis_index, sign_column = divmod(flat_index, 2)
+    return axis_index, _to_sign(sign_column), float(separations[axis_index, sign_column])
+
+
+# 축·방향별 분리량 3x2 배열.
+# 열 0은 - 방향(장애물 최소 - 부품 최대), 열 1은 + 방향(부품 최소 - 장애물 최대)이다.
+# 양수면 그 방향으로 이미 떨어져 있다.
+def get_axis_separations(
+    moving_world_vertices: np.ndarray, obstacle_bounding_box: np.ndarray
+) -> np.ndarray:
+    moving_lower_bound = moving_world_vertices.min(axis=0)
+    moving_upper_bound = moving_world_vertices.max(axis=0)
+    return np.stack(
+        [
+            obstacle_bounding_box[0] - moving_upper_bound,
+            moving_lower_bound - obstacle_bounding_box[1],
+        ],
+        axis=1,
+    )
+
+
+# 열 번호(0/1) → 부호(-1/+1)
+def _to_sign(sign_column: int) -> int:
+    return -1 if sign_column == 0 else 1
+
+
+# 부호(-1/+1) → 열 번호(0/1)
+def _to_sign_column(sign: int) -> int:
+    return 0 if sign < 0 else 1
+
+
+# 열린 정도를 잴 때 축마다 쓰는 광선 수(격자 칸 수)
+OPENNESS_COLUMN_COUNT = 16384
+
+# 축 번호 → 그 축에 수직인 평면의 두 축 번호
+_PLANE_AXIS_INDICES = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+
+# 광선-삼각형 교차 후보를 한 번에 처리할 최대 개수(메모리 제한)
+_CANDIDATE_CHUNK_SIZE = 2_000_000
+
+# 직선 분해 목표 이동량에 더하는 아주 작은 여유(경계값 비교 오차 방지)
+_EXTRACTION_BOUNDARY_MARGIN = 1e-6
+
+
+# axis 방향 광선들과 삼각형들의 교차를 구한다. 광선은 axis에 수직인 평면 위에
+# grid_spacing 간격 격자로 놓인다. 반환: (교차한 칸 번호, 교차 지점의 axis 좌표)
+def _to_column_crossings(
+    triangles: np.ndarray,
+    axis_index: int,
+    grid_origin: Tuple[float, float],
+    grid_spacing: float,
+    grid_shape: Tuple[int, int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    first_plane_axis, second_plane_axis = _PLANE_AXIS_INDICES[axis_index]
+    first = triangles[:, :, first_plane_axis]
+    second = triangles[:, :, second_plane_axis]
+    depth = triangles[:, :, axis_index]
+
+    # 삼각형 투영의 경계 상자 안에 드는 격자 칸 범위
+    first_lower = np.maximum(np.ceil((first.min(axis=1) - grid_origin[0]) / grid_spacing), 0)
+    first_upper = np.minimum(
+        np.floor((first.max(axis=1) - grid_origin[0]) / grid_spacing), grid_shape[0] - 1
+    )
+    second_lower = np.maximum(np.ceil((second.min(axis=1) - grid_origin[1]) / grid_spacing), 0)
+    second_upper = np.minimum(
+        np.floor((second.max(axis=1) - grid_origin[1]) / grid_spacing), grid_shape[1] - 1
+    )
+    first_counts = (first_upper - first_lower + 1).astype(np.int64)
+    second_counts = (second_upper - second_lower + 1).astype(np.int64)
+
+    # 투영된 삼각형의 두 모서리 벡터와 행렬식(0에 가까우면 광선과 나란한 삼각형이라 뺀다)
+    edge_first_u = first[:, 1] - first[:, 0]
+    edge_first_v = second[:, 1] - second[:, 0]
+    edge_second_u = first[:, 2] - first[:, 0]
+    edge_second_v = second[:, 2] - second[:, 0]
+    determinant = edge_first_u * edge_second_v - edge_second_u * edge_first_v
+
+    candidate_counts = np.where(
+        (first_counts > 0) & (second_counts > 0) & (np.abs(determinant) > 1e-14),
+        first_counts * second_counts,
+        0,
+    )
+    triangle_indices = np.nonzero(candidate_counts)[0]
+    if len(triangle_indices) == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=float)
+
+    # 후보 (삼각형, 칸) 쌍을 _CANDIDATE_CHUNK_SIZE개씩 나눠 처리한다.
+    column_blocks: List[np.ndarray] = list()
+    depth_blocks: List[np.ndarray] = list()
+    cumulative_counts = np.cumsum(candidate_counts[triangle_indices])
+    chunk_start = 0
+    while chunk_start < len(triangle_indices):
+        consumed = cumulative_counts[chunk_start - 1] if chunk_start > 0 else 0
+        chunk_stop = int(
+            np.searchsorted(cumulative_counts, consumed + _CANDIDATE_CHUNK_SIZE, side="right")
+        )
+        chunk_stop = max(chunk_stop, chunk_start + 1)
+        chunk = triangle_indices[chunk_start:chunk_stop]
+        counts = candidate_counts[chunk]
+        # 후보마다 삼각형 번호와 칸의 두 격자 번호를 펼친다.
+        triangle = np.repeat(chunk, counts)
+        offset = np.arange(int(counts.sum())) - np.repeat(np.cumsum(counts) - counts, counts)
+        row_length = np.repeat(second_counts[chunk], counts)
+        first_index = np.repeat(first_lower[chunk], counts).astype(np.int64) + offset // row_length
+        second_index = np.repeat(second_lower[chunk], counts).astype(np.int64) + offset % row_length
+
+        # barycentric 좌표로 칸 중심이 삼각형 안인지 보고, 안이면 교차 깊이를 보간한다.
+        relative_u = grid_origin[0] + first_index * grid_spacing - first[triangle, 0]
+        relative_v = grid_origin[1] + second_index * grid_spacing - second[triangle, 0]
+        chunk_determinant = determinant[triangle]
+        weight_first = (
+            relative_u * edge_second_v[triangle] - edge_second_u[triangle] * relative_v
+        ) / chunk_determinant
+        weight_second = (
+            edge_first_u[triangle] * relative_v - relative_u * edge_first_v[triangle]
+        ) / chunk_determinant
+        weight_origin = 1.0 - weight_first - weight_second
+        is_inside = (weight_origin >= 0.0) & (weight_first >= 0.0) & (weight_second >= 0.0)
+
+        crossing_depth = (
+            weight_origin * depth[triangle, 0]
+            + weight_first * depth[triangle, 1]
+            + weight_second * depth[triangle, 2]
+        )
+        column_blocks.append((first_index * grid_shape[1] + second_index)[is_inside])
+        depth_blocks.append(crossing_depth[is_inside])
+        chunk_start = chunk_stop
+    return np.concatenate(column_blocks), np.concatenate(depth_blocks)
+
+
+# 칸마다 교차 깊이를 정렬해 (들어감, 나옴) 쌍으로 묶어 물체 내부 구간을 만든다.
+# 교차 수가 홀수인 칸(접선이나 틈 때문에 짝이 맞지 않는 칸)은 버린다.
+# 반환: (칸 번호, 구간 시작 깊이, 구간 끝 깊이)
+def _to_material_intervals(
+    column_indices: np.ndarray, depths: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if len(column_indices) == 0:
+        empty = np.zeros(0, dtype=float)
+        return np.zeros(0, dtype=np.int64), empty, empty
+    order = np.lexsort((depths, column_indices))
+    column_indices = column_indices[order]
+    depths = depths[order]
+    _, first_positions, counts = np.unique(
+        column_indices, return_index=True, return_counts=True
+    )
+    rank = np.arange(len(column_indices)) - np.repeat(first_positions, counts)
+    is_kept = np.repeat(counts % 2 == 0, counts)
+    column_indices, depths, rank = column_indices[is_kept], depths[is_kept], rank[is_kept]
+    is_entry = rank % 2 == 0
+    return column_indices[is_entry], depths[is_entry], depths[~is_entry]
+
+
+# 여섯 방향(±x, ±y, ±z)으로 부품이 얼마나 열려 있는지(열린 정도 0~1) 구한다.
+# 축마다 부품 투영을 덮는 광선 격자를 만들고, 진행 방향에서 장애물에 부딪히는 칸을
+# 막힌 칸으로 센다. 열린 정도 = 1 - 막힌 칸 수 / 센 칸 수.
+# 반환: 3x2 배열(행 = 축, 열 0 = - 방향, 열 1 = + 방향)
+def get_axis_openness(
+    moving_world_vertices: np.ndarray,
+    moving_faces: np.ndarray,
+    obstacle_world_meshes: List[Tuple[np.ndarray, np.ndarray]],
+    column_count: int,
+) -> np.ndarray:
+    openness = np.zeros((3, 2), dtype=float)
+    lower_bound = moving_world_vertices.min(axis=0)
+    upper_bound = moving_world_vertices.max(axis=0)
+    moving_triangles = moving_world_vertices[moving_faces]
+    obstacle_triangle_sets = list()
+    for obstacle_vertices, obstacle_faces in obstacle_world_meshes:
+        triangles = obstacle_vertices[obstacle_faces]
+        obstacle_triangle_sets.append(
+            (triangles, triangles.min(axis=1), triangles.max(axis=1))
+        )
+    for axis_index in range(3):
+        first_plane_axis, second_plane_axis = _PLANE_AXIS_INDICES[axis_index]
+        projected_area = (upper_bound[first_plane_axis] - lower_bound[first_plane_axis]) * (
+            upper_bound[second_plane_axis] - lower_bound[second_plane_axis]
+        )
+        # 부품 투영 넓이를 column_count개 칸으로 나누는 격자 간격
+        grid_spacing = float(np.sqrt(max(projected_area, 1e-12) / column_count))
+        # 격자 시작점을 간격의 1/π, e/10배만큼 밀어 칸 중심이 메쉬 모서리나 정점에 정확히
+        # 걸리는 경우를 피한다.
+        grid_origin = (
+            float(lower_bound[first_plane_axis]) + grid_spacing * 0.3183098861837907,
+            float(lower_bound[second_plane_axis]) + grid_spacing * 0.2718281828459045,
+        )
+        grid_shape = (
+            int(np.floor((upper_bound[first_plane_axis] - grid_origin[0]) / grid_spacing)) + 1,
+            int(np.floor((upper_bound[second_plane_axis] - grid_origin[1]) / grid_spacing)) + 1,
+        )
+        # 움직이는 부품의 칸별 내부 구간
+        moving_columns, moving_entries, moving_exits = _to_material_intervals(
+            *_to_column_crossings(moving_triangles, axis_index, grid_origin, grid_spacing, grid_shape)
+        )
+        if len(moving_columns) == 0:
+            continue
+
+        # 부품 투영 범위에 걸치는 장애물 삼각형만 골라 칸별 내부 구간을 구한다.
+        obstacle_intervals = list()
+        for triangles, triangle_lower, triangle_upper in obstacle_triangle_sets:
+            is_touching = (
+                (triangle_upper[:, first_plane_axis] >= lower_bound[first_plane_axis])
+                & (triangle_lower[:, first_plane_axis] <= upper_bound[first_plane_axis])
+                & (triangle_upper[:, second_plane_axis] >= lower_bound[second_plane_axis])
+                & (triangle_lower[:, second_plane_axis] <= upper_bound[second_plane_axis])
+            )
+            if not np.any(is_touching):
+                continue
+            obstacle_intervals.append(
+                _to_material_intervals(
+                    *_to_column_crossings(
+                        triangles[is_touching], axis_index, grid_origin, grid_spacing, grid_shape
+                    )
+                )
+            )
+
+        # 열 1(+ 방향)은 깊이를 그대로, 열 0(- 방향)은 깊이 부호를 뒤집어 같은 방식으로 처리한다.
+        for sign_column in range(2):
+            if sign_column == 1:
+                entries, exits = moving_entries, moving_exits
+            else:
+                entries, exits = -moving_exits, -moving_entries
+            order = np.lexsort((entries, moving_columns))
+            sorted_columns, sorted_entries, sorted_exits = (
+                moving_columns[order], entries[order], exits[order]
+            )
+            columns, first_positions, interval_counts = np.unique(
+                sorted_columns, return_index=True, return_counts=True
+            )
+            # 칸마다 부품의 뒤끝(가장 작은 시작 깊이)과 앞끝(가장 큰 끝 깊이)
+            rear_depths = np.minimum.reduceat(sorted_entries, first_positions)
+            front_depths = np.maximum.reduceat(sorted_exits, first_positions)
+            is_blocked = np.zeros(len(columns), dtype=bool)
+            is_inside_obstacle = np.zeros(len(columns), dtype=bool)
+
+            for obstacle_columns, obstacle_entries, obstacle_exits in obstacle_intervals:
+                if len(obstacle_columns) == 0:
+                    continue
+                if sign_column == 1:
+                    starts, ends = obstacle_entries, obstacle_exits
+                else:
+                    starts, ends = -obstacle_exits, -obstacle_entries
+                positions = np.clip(np.searchsorted(columns, obstacle_columns), 0, len(columns) - 1)
+                is_shared = columns[positions] == obstacle_columns
+                positions, starts, ends = positions[is_shared], starts[is_shared], ends[is_shared]
+                if len(positions) == 0:
+                    continue
+                rear = rear_depths[positions]
+                front = front_depths[positions]
+
+                # 장애물 구간이 부품 뒤끝보다 앞에서 시작하면 그 방향으로 밀 때 부딪친다.
+                is_ahead = starts > rear + grid_spacing
+                # 장애물 구간이 부품 구간 전체를 덮으면 부품이 장애물과 겹쳐 있는 칸이다.
+                is_enclosing = (starts <= rear + grid_spacing) & (ends >= front - grid_spacing)
+                is_inside_obstacle[positions[is_enclosing]] = True
+
+                # 장애물 구간이 부품 자신의 내부 구간 하나 안에 들어 있으면(조립 상태 겹침)
+                # 막힘에서 뺀다.
+                is_embedded = np.zeros(len(positions), dtype=bool)
+                block_start = first_positions[positions]
+                block_stop = block_start + interval_counts[positions]
+                for interval_rank in range(int(interval_counts.max())):
+                    candidate = block_start + interval_rank
+                    is_valid = candidate < block_stop
+                    candidate = np.where(is_valid, candidate, block_start)
+                    is_embedded |= (
+                        is_valid
+                        & (sorted_entries[candidate] - grid_spacing <= starts)
+                        & (sorted_exits[candidate] + grid_spacing >= ends)
+                    )
+                is_blocked[positions[is_ahead & ~is_embedded]] = True
+
+            # 장애물과 겹쳐 있는 칸은 막혔을 때만 센다.
+            is_counted = ~is_inside_obstacle | is_blocked
+            counted_count = int(np.count_nonzero(is_counted))
+            if counted_count > 0:
+                openness[axis_index, sign_column] = 1.0 - (
+                    np.count_nonzero(is_blocked) / counted_count
+                )
+    return openness
+
+
+# RRT* 탐색 설정. 길이 단위는 STEP 좌표 단위이며, main.py가 델타(최소 부품 두께 / 2)를
+# 기준으로 값을 정한다.
 @dataclass(frozen=True)
 class RRTStarConfig:
-    """RRT* 탐색 하이퍼파라미터.
-
-    Attributes:
-        max_iteration_count: 최대 반복(샘플) 횟수.
-        translation_step_size: 한 번의 확장에서 위치가 목표로 나아가는 최대 거리.
-        neighbor_radius: 부모 재선택·재배선 시 이웃으로 볼 상태 거리 반경(metric 단위).
-        goal_sample_rate: 무작위 샘플 대신 목표(추출) 영역을 샘플링할 확률 [0,1].
-        rotation_distance_weight: 자세가 다를 때 비용에 더하는 길이(자세 전이 1회의 값).
-            비용 함수의 회전 항이 지시함수이므로 '라디안당 길이' 가 아니라 '전이 1회당
-            길이' 다. translation_step_size 와 같게 두면 '회전 한 번 = 한 스텝 이동' 이 된다.
-        translation_interpolation_count: 이동 간선의 스윕 충돌 검사 표본 수(2 이상).
-        rotation_interpolation_count: 회전 간선의 스윕 충돌 검사 표본 수(2 이상). 시작->끝
-            자세를 SLERP 로 세분해 각 중간 자세의 관통을 검사한다(회전 도중 충돌 방지).
-        removal_clearance: 목표 판정에서 부품 AABB 가 조립체 AABB 로부터 떨어져야 할 여유값.
-        sampling_margin_ratio: 샘플링 경계상자를 조립체 AABB 대비 각 방향으로 확장하는 비율.
-        does_sample_rotation: True 이면 자세도 무작위 샘플링, False 이면 시작 자세 고정(이동만).
-        maximum_extension_step_count: 한 번의 반복에서 샘플 방향으로 연속으로 뻗는 최대 확장
-            횟수(1 이상). 1이면 표준 RRT*(한 스텝), 크면 RRT-Connect 식 탐욕 확장으로 좁은
-            축 통로를 따라 부품을 한 번에 끝까지 밀어낼 수 있다.
-        stops_at_first_feasible_path: True 이면 목표에 도달하는 첫 실현 가능 경로를 찾는
-            즉시 탐색을 중단하고 그 경로를 반환한다(최고 속도 우선). RRT* 의 점근적
-            최적성을 포기하는 대신, 병렬 경주(여러 부품을 동시에 탐색해 먼저 성공한
-            부품을 채택)에서 승자를 최대한 빨리 확정하는 용도이다. False 이면
-            max_iteration_count 까지 돌며 더 낮은 비용의 경로를 계속 찾는다.
-        random_seed: 난수 시드(재현성).
-    """
-
+    # 최대 반복 횟수(탐색 단계마다)
     max_iteration_count: int
+    # 델타: 한 번 확장할 때의 최대 평행이동 거리
     translation_step_size: float
+    # 이웃 반경: 부모 선택과 재연결 대상이 되는 상태 거리
     neighbor_radius: float
+    # 목표 편향 비율: 이 확률로 무작위 샘플 대신 목표 쪽 샘플을 쓴다.
     goal_sample_rate: float
+    # 자세가 다를 때 상태 거리에 더하는 회전 비용
     rotation_distance_weight: float
+    # 평행이동 구간 간섭 검사의 최소 보간 점 수
     translation_interpolation_count: int
+    # 회전 구간 간섭 검사의 보간 점 수
     rotation_interpolation_count: int
+    # 목표 여유: 장애물 경계 상자에서 이만큼 떨어지면 분해된 것으로 본다.
     removal_clearance: float
+    # 샘플링 범위를 조립체 크기의 이 비율만큼 사방으로 넓힌다.
     sampling_margin_ratio: float
+    # 평행이동만으로 실패하면 회전까지 샘플링해 다시 탐색할지 여부
     does_sample_rotation: bool
+    # 연속 확장 한계: 샘플 하나를 향해 델타씩 연속으로 뻗는 최대 횟수
     maximum_extension_step_count: int
+    # 첫 분해 경로를 찾으면 반복을 멈출지 여부
     stops_at_first_feasible_path: bool
+    # 난수 시드
     random_seed: int
 
+    # 설정값 범위를 검사한다.
     def __post_init__(self) -> None:
         if self.max_iteration_count < 1:
             raise PlanningException(
@@ -204,86 +442,64 @@ class RRTStarConfig:
             )
 
 
+# 트리 노드: 상태, 부모 노드 번호(루트는 None), 시작점부터의 누적 비용
 @dataclass
 class _TreeNode:
-    """탐색 트리의 노드. 상태·부모 인덱스·시작으로부터의 누적 비용을 담는다."""
-
     state: State
     parent_index: Optional[int]
     cost_from_start: float
 
 
+# 탐색 결과. 성공하면 states/actions가 분해 경로(조립 상태 → 분해된 상태)이다.
 @dataclass(frozen=True)
 class PlanningResult:
-    """탐색 결과.
-
-    Attributes:
-        is_success: 목표(추출) 상태에 도달하는 경로를 찾았는지 여부.
-        states: 시작부터 목표까지의 상태 나열(성공 시 길이 >= 1, 실패 시 비어 있음).
-        actions: 상태 전이 동작 나열(len(states) - 1 개).
-        cost: 경로의 총 비용(metric 거리 합). 실패 시 무한대.
-        iteration_count: 실제 수행한 반복 횟수.
-    """
-
     is_success: bool
     states: Tuple[State, ...]
     actions: Tuple[Action, ...]
+    # 경로 비용(상태 거리의 합). 실패면 inf
     cost: float
+    # 수행한 반복 수(탐색 단계 합계)
     iteration_count: int
+    # 실패 진단용: 6방향마다 가장 멀리 간 노드까지의 (상태들, 동작들, 분리량).
+    # 순서는 축 번호 × 2 + 열 번호(0 = - 방향, 1 = + 방향)
+    farthest_paths: Tuple[Tuple[Tuple[State, ...], Tuple[Action, ...], float], ...]
+    # 평행이동 단계와 회전 단계 각각의 반복 수
+    translation_iteration_count: int = 0
+    rotation_iteration_count: int = 0
 
 
+# InterferenceSession을 State 단위로 쓰도록 감싼다.
+# 상태 하나와 구간(평행이동, 회전)이 허용 상한 이내인지 판정한다.
 class InterferenceSessionAdapter:
-    """InterferenceSession 을 planner 가 기대하는 충돌 세션 인터페이스로 감싼다.
-
-    planner 는 State(연속 위치 + 이산 회전)로 말하고 판정기는 4x4 변환으로 말하므로
-    그 번역을 이 어댑터가 담당한다. 제공하는 것은 세 메서드뿐이다 — is_valid_state,
-    is_path_segment_valid, is_rotation_segment_valid. 회전 스윕의 기하 규약(무게중심
-    고정 SLERP)은 아래 RRTStarPlanner 의 회전 규약과 동일해야 한다.
-
-    FCL 관통 깊이를 대체한 근거(Cleaner.STEP 실측): 대형 껍데기가 자유축으로 나가는
-    경로에서 간섭 증가는 모든 거리에서 정확히 0 인데 FCL depth 는 8~10 유닛 구간에서
-    14.109 로 튀어 충돌로 판정한다. 이 가짜 관문이 껍데기의 유일한 탈출로를 막아 분해가
-    8/13 에서 멈췄다.
-    """
-
     def __init__(
         self,
         interference_session: InterferenceSession,
         moving_centroid_local: np.ndarray,
     ):
-        """어댑터를 만든다.
-
-        Args:
-            interference_session: 이동 부품과 장애물이 이미 묶인 간섭 부피 세션.
-            moving_centroid_local: 이동 부품의 로컬 무게중심. 회전 스윕의 고정점
-                계산에 쓰며, planner 의 무게중심 기준 회전 규약과 일치해야 한다.
-        """
         self.interference_session = interference_session
         self.moving_centroid_local = np.asarray(moving_centroid_local, dtype=float)
 
+    # 세션의 판정 요청 수
     @property
     def query_count(self) -> int:
-        """지금까지의 판정 질의 수."""
         return self.interference_session.query_count
 
+    # 세션의 불린 연산 수
     @property
     def boolean_count(self) -> int:
-        """AABB 사전 필터를 통과해 실제 불린이 수행된 횟수."""
         return self.interference_session.boolean_count
 
+    # 상태 하나가 허용 상한 이내인지 판정한다.
     def is_valid_state(self, moving_state: State) -> bool:
-        """이 상태에서 조립 상태보다 간섭이 늘지 않으면 True."""
         return self.interference_session.is_transformation_valid(
             moving_state.to_transformation_matrix()
         )
 
+    # 자세가 같은 두 상태 사이의 평행이동 구간을 양 끝 포함 interpolation_count개 점으로
+    # 나눠 판정한다.
     def is_path_segment_valid(
         self, start_state: State, goal_state: State, interpolation_count: int
     ) -> bool:
-        """두 상태를 잇는 이동 구간 전체가 유효한지 검사한다.
-
-        순수 이동 구간을 전제한다 — 회전이 다르면 예외를 던진다.
-        """
         if interpolation_count < 2:
             raise InterferenceException(
                 f"interpolation_count must be at least 2, received {interpolation_count}"
@@ -309,22 +525,17 @@ class InterferenceSessionAdapter:
                 return False
         return True
 
+    # 무게 중심을 고정한 채 start 자세에서 goal 자세로 도는 구간을 판정한다.
     def is_rotation_segment_valid(
         self, start_state: State, goal_state: State, interpolation_count: int
     ) -> bool:
-        """두 상태를 잇는 회전 구간 전체가 유효한지 검사한다.
-
-        회전 중심은 planner 의 규약과 같은 '이동 부품의 월드 무게중심'이다. 무게중심
-        기준 회전은 회전 전후로 월드 무게중심을 고정하므로 시작·끝 상태는 position 이
-        달라도 같은 월드 무게중심을 공유한다. 그 공유 무게중심을 고정점으로 SLERP
-        보간한 각 중간 자세를 검사한다.
-        """
         if interpolation_count < 2:
             raise InterferenceException(
                 f"interpolation_count must be at least 2, received {interpolation_count}"
             )
         start_rotation_matrix = start_state.to_rotation_matrix()
         goal_rotation_matrix = goal_state.to_rotation_matrix()
+        # 자세가 같으면 상태 하나만 판정한다.
         if np.allclose(start_rotation_matrix, goal_rotation_matrix):
             return self.is_valid_state(start_state)
 
@@ -332,6 +543,7 @@ class InterferenceSessionAdapter:
         goal_position = np.asarray(goal_state.position, dtype=float)
         start_world_centroid = start_rotation_matrix @ self.moving_centroid_local + start_position
         goal_world_centroid = goal_rotation_matrix @ self.moving_centroid_local + goal_position
+        # 두 상태의 월드 무게 중심이 다르면 순수 회전이 아니므로 예외
         if not np.allclose(start_world_centroid, goal_world_centroid, atol=1e-6):
             raise InterferenceException(
                 "is_rotation_segment_valid assumes a pure rotation about the moving "
@@ -340,6 +552,7 @@ class InterferenceSessionAdapter:
             )
         world_centroid = start_world_centroid
 
+        # Slerp(구면 선형 보간)로 자세를 나누고, 무게 중심이 제자리에 있도록 위치를 맞춘다.
         key_rotations = Rotation.from_matrix(
             np.stack([start_rotation_matrix, goal_rotation_matrix])
         )
@@ -358,13 +571,11 @@ class InterferenceSessionAdapter:
         return True
 
 
+# 부품 하나의 분해 경로를 찾는 플래너. execute_search는 직선 분해(Tier1)를 먼저 시도하고,
+# 안 되면 RRT*(Tier2)를 쓴다. RRT*는 평행이동만 샘플링해 보고, 실패하면 회전까지 샘플링한다.
 class RRTStarPlanner:
-    """한 부품의 분해 경로를 RRT*로 탐색하는 경로 계획기.
-
-    한 번에 하나의 부품(moving solid)만 움직이고 나머지는 조립 자세로 고정한다.
-    충돌 검사는 생성 시점에 만든 간섭 부피 세션 하나를 재사용한다.
-    """
-
+    # 입력 검사, 시작 상태 간섭 검사, 장애물 경계 상자와 샘플링 범위 계산,
+    # 바로 움직일 수 있는 방향 탐색을 한다.
     def __init__(
         self,
         moving_solid_id: int,
@@ -373,21 +584,6 @@ class RRTStarPlanner:
         config: RRTStarConfig,
         interference_session: "object",
     ):
-        """계획기를 구성한다.
-
-        Args:
-            moving_solid_id: 분해할(움직일) 부품의 식별자.
-            solid_meshes: 부품 식별자 -> 로컬 좌표계 trimesh.Trimesh 형상.
-            assembled_states: 부품 식별자 -> 조립 상태 자세. moving_solid_id 의 자세가
-                탐색의 시작 상태가 된다.
-            config: RRT* 하이퍼파라미터.
-            interference_session: core.interference.InterferenceSession. 충돌을 '간섭
-                길이' 로 판정한다 — 조립 상태의 간섭을 기준선으로 삼고 그보다 증가하면
-                충돌로 본다.
-
-        Raises:
-            PlanningException: 부품 식별자가 맞지 않거나 조립 상태가 이미 충돌인 경우.
-        """
         if moving_solid_id not in solid_meshes:
             raise PlanningException(
                 f"moving solid {moving_solid_id} is not present in solid_meshes"
@@ -406,13 +602,13 @@ class RRTStarPlanner:
         self.assembled_states = assembled_states
         self.config = config
 
-        # 충돌 판정은 간섭 부피 하나로 고정한다. 어댑터가 planner 가 기대하는 세 메서드
-        # (is_valid_state / is_path_segment_valid / is_rotation_segment_valid)를 제공한다.
+        # 회전 중심은 움직이는 부품 메쉬의 무게 중심(로컬 좌표)이다.
         self.collision_session = InterferenceSessionAdapter(
             interference_session,
             np.asarray(solid_meshes[moving_solid_id].centroid, dtype=float),
         )
 
+        # 시작 상태 = 조립 상태. 이미 허용 상한을 넘으면 탐색할 수 없다.
         self.start_state = assembled_states[moving_solid_id]
         if not self.collision_session.is_valid_state(self.start_state):
             raise PlanningException(
@@ -423,31 +619,26 @@ class RRTStarPlanner:
         moving_mesh = solid_meshes[moving_solid_id]
         self.moving_centroid_local = np.asarray(moving_mesh.centroid, dtype=float)
         self.moving_vertices_local = np.asarray(moving_mesh.vertices, dtype=float)
+        self.moving_faces = np.asarray(moving_mesh.faces, dtype=np.int64)
+        # 가장 열린 방향 계산 결과 캐시
+        self._most_open_axis_direction: Optional[Tuple[int, int, float]] = None
 
         self.obstacle_bounding_box = self._to_obstacle_bounding_box()
         self.sampling_lower_bound, self.sampling_upper_bound = self._to_sampling_bounds()
         self.random_generator = np.random.default_rng(config.random_seed)
 
-        # 시작(조립) 상태에서 움직이는 부품의 월드 AABB. 목표 편향 샘플이 필요한 '이동량'을
-        # 좌표계 혼동 없이 계산하는 데 쓴다. State.position 은 절대 월드 위치가 아니라 부품
-        # 원본 메쉬 좌표에 더해지는 '이동(translation)'이므로, 목표 위치도 이동량으로 다뤄야 한다.
+        # 조립 상태에서 움직이는 부품의 월드 경계 상자
         moving_start_world_vertices = self._to_world_vertices(
             self.moving_vertices_local, self.start_state.to_transformation_matrix()
         )
         self.moving_start_lower_bound = moving_start_world_vertices.min(axis=0)
         self.moving_start_upper_bound = moving_start_world_vertices.max(axis=0)
 
+        # 조립 상태에서 델타만큼 바로 움직일 수 있는 (축, 부호) 목록
         self.free_escape_axis_directions = self._to_free_escape_axis_directions()
 
+    # 여섯 방향으로 델타만큼 평행이동해 보고, 간섭 없이 움직일 수 있는 (축, 부호)를 모은다.
     def _to_free_escape_axis_directions(self) -> List[Tuple[int, int]]:
-        """시작 상태에서 한 스텝 곧게 밀 수 있는 축·부호 방향 목록을 반환한다.
-
-        여섯 축정렬 방향(+/-X, +/-Y, +/-Z) 각각에 대해 translation_step_size 만큼의 직선
-        이동이 충돌 없이 가능한지 한 번씩만 검사한다. 스냅 핏 조립에서 부품이 실제로
-        빠져나갈 수 있는 방향은 대개 이 중 극소수이므로, 목표 편향 샘플을 이 방향들로
-        집중시키기 위한 사전 정보로 쓴다. (반환 형식: (axis_index, sign) 튜플의 리스트,
-        sign 은 +1 또는 -1). 비어 있으면 어떤 축으로도 한 스텝조차 못 미는 상태를 뜻한다.
-        """
         free_axis_directions: List[Tuple[int, int]] = list()
         for axis_index in range(3):
             for sign in (1, -1):
@@ -467,8 +658,8 @@ class RRTStarPlanner:
                     free_axis_directions.append((axis_index, sign))
         return free_axis_directions
 
+    # 움직이는 부품을 뺀 나머지 부품 전체의 월드 경계 상자 [[최소], [최대]]
     def _to_obstacle_bounding_box(self) -> np.ndarray:
-        """고정 부품 전체의 월드 축정렬 경계상자를 [[min],[max]] (2x3)로 반환한다."""
         minimum_corners = list()
         maximum_corners = list()
         for solid_id, mesh in self.solid_meshes.items():
@@ -488,8 +679,8 @@ class RRTStarPlanner:
             [np.min(minimum_corners, axis=0), np.max(maximum_corners, axis=0)]
         )
 
+    # 조립체 전체 경계 상자를 sampling_margin_ratio만큼 사방으로 넓힌 샘플링 범위
     def _to_sampling_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
-        """전체 조립체 AABB 를 margin 비율로 확장한 샘플링 경계(하한, 상한)를 반환한다."""
         minimum_corners = list()
         maximum_corners = list()
         for solid_id, mesh in self.solid_meshes.items():
@@ -505,16 +696,17 @@ class RRTStarPlanner:
         margin = assembly_extent * self.config.sampling_margin_ratio
         return assembly_lower_bound - margin, assembly_upper_bound + margin
 
+    # 로컬 정점에 4x4 변환을 적용해 월드 좌표로 바꾼다.
     def _to_world_vertices(
         self, local_vertices: np.ndarray, transformation_matrix: np.ndarray
     ) -> np.ndarray:
-        """로컬 정점들을 동차 변환행렬로 월드 좌표로 옮긴다."""
         rotation_part = transformation_matrix[:3, :3]
         translation_part = transformation_matrix[:3, 3]
         return local_vertices @ rotation_part.T + translation_part
 
+    # 상태에 동작 하나를 적용한 다음 상태. 평행이동은 위치에 더하고, 회전은 월드 무게 중심을
+    # 기준으로 돌린다(자세는 대표 오일러 각으로 정규화).
     def get_next_state(self, state: State, action: Action) -> State:
-        """상태에 동작을 적용한 다음 상태를 반환한다(회전은 부품 월드 무게중심 기준)."""
         current_rotation_matrix = state.to_rotation_matrix()
         current_position = np.asarray(state.position, dtype=float)
 
@@ -522,6 +714,7 @@ class RRTStarPlanner:
             next_position = current_position + np.asarray(action.value, dtype=float)
             return State(position=tuple(next_position), rotation=state.rotation)
 
+        # 월드 무게 중심 c를 고정한 회전: 새 자세 = R_action·R, 새 위치 = R_action·(p - c) + c
         action_rotation_matrix = _to_grid_rotation_matrix(action.value)
         world_centroid = current_rotation_matrix @ self.moving_centroid_local + current_position
         next_rotation_matrix = action_rotation_matrix @ current_rotation_matrix
@@ -533,10 +726,11 @@ class RRTStarPlanner:
             rotation=_to_canonical_rotation_euler(next_rotation_matrix),
         )
 
+    # 두 상태를 잇는 동작 목록: 자세가 다르면 무게 중심 기준 회전 하나,
+    # 이어서 남은 위치 차이만큼 평행이동 하나. 반환: [(동작, 동작 후 상태), ...]
     def get_edge_actions(
         self, from_state: State, to_state: State
     ) -> List[Tuple[Action, State]]:
-        """두 상태를 잇는 (동작, 결과 상태) 나열을 반환한다(회전 후 이동 순서, 최대 2개)."""
         edge_actions: List[Tuple[Action, State]] = list()
         intermediate_state = from_state
 
@@ -562,26 +756,14 @@ class RRTStarPlanner:
             edge_actions.append((translation_action, intermediate_state))
 
         return edge_actions
+    # 평행이동 구간의 간섭 판정
     def _segment_valid(self, start_state, goal_state, interpolation_count) -> bool:
-        """이동 구간을 표본점마다 판정한다."""
         return self.collision_session.is_path_segment_valid(
             start_state, goal_state, interpolation_count
         )
 
+    # 평행이동 구간의 보간 점 수: 델타마다 한 점 이상, 최소 translation_interpolation_count개
     def _interpolation_count_for(self, first_state: State, second_state: State) -> int:
-        """이동 거리에 비례한 스윕 표본 수를 돌려준다.
-
-        고정 표본 수는 긴 간선에서 원리적으로 관통을 놓칠 수 있다 — 실측: 356.6 유닛을 한
-        스텝에 이동하는 간선을 10 등분하면 표본 간격이 35.6 유닛이 되어, 그 사이에 있는
-        부품(수십 유닛)을 통째로 건너뛴다. 그래서 표본 간격이 translation_step_size 를 넘지
-        않도록 표본 수를 늘린다. 짧은 간선에서는 설정값 그대로이므로 기존 동작과 비용이
-        유지된다.
-
-        이 조정만으로 모든 관통이 사라지는 것은 아니다 — 삼각형 면제 방식을 쓰던 시절
-        통제된 A/B(같은 시드, 검증 표본 고정, 이 조정만 토글)에서 관통 2 건이 소수점까지
-        동일하게 남았다. 즉 근거는 '표본 간격이 부품 크기를 넘지 않게 한다' 는 것 하나이며,
-        간섭 부피 판정에서는 그 두 관통이 재현되지 않는다.
-        """
         distance = float(
             np.linalg.norm(
                 np.asarray(second_state.position, dtype=float)
@@ -594,14 +776,25 @@ class RRTStarPlanner:
         required = int(np.ceil(distance / max(self.config.translation_step_size, 1e-9))) + 1
         return max(base_count, required)
 
+    # 직선 분해와 진단용 보간 점 수: 점 간격이 델타 / (translation_interpolation_count - 1)이
+    # 되도록 촘촘하게 잡는다.
+    def _straight_interpolation_count_for(self, first_state: State, second_state: State) -> int:
+        distance = float(
+            np.linalg.norm(
+                np.asarray(second_state.position, dtype=float)
+                - np.asarray(first_state.position, dtype=float)
+            )
+        )
+        base_count = self.config.translation_interpolation_count
+        if distance <= 0.0:
+            return base_count
+        required = int(
+            np.ceil(distance / self.config.translation_step_size * (base_count - 1))
+        ) + 1
+        return max(base_count, required)
 
+    # 두 상태를 잇는 동작(회전 → 평행이동)을 차례로 적용하며 각 구간이 간섭 없는지 확인한다.
     def is_edge_valid(self, from_state: State, to_state: State) -> bool:
-        """두 상태를 잇는 간선의 모든 동작이 충돌 없이 유효한지 검사한다.
-
-        회전 동작과 이동 동작 모두 구간 전체(스윕)를 검사한다. 회전은 시작->끝 자세를
-        SLERP 로 세분해 각 중간 자세의 관통을 확인하고(회전 도중 충돌 방지), 이동은
-        위치를 선형 보간해 검사한다(빠른 이동의 터널링 방지).
-        """
         previous_state = from_state
         for action, resulting_state in self.get_edge_actions(from_state, to_state):
             if action.is_rotation():
@@ -621,23 +814,8 @@ class RRTStarPlanner:
             previous_state = resulting_state
         return True
 
+    # 상태 거리 = 위치 거리 + (자세가 다르면 회전 비용). 최근접 노드와 경로 비용 계산에 쓴다.
     def get_state_distance(self, first_state: State, second_state: State) -> float:
-        """두 상태 사이의 hybrid 거리를 반환한다.
-
-            c(q1, q2) = ||p2 - p1||_2  +  w * 1[R1 != R2]
-
-        회전 항은 자세가 다르면 w, 같으면 0 인 지시함수다. 자세 비교는 대표 오일러로
-        정규화하므로 (0,90,90) 과 (90,0,90) 처럼 표현만 다른 같은 회전은 거리 0 이다.
-
-        측지각을 쓰지 않는 이유는 행동 공간과의 정합성이다 — 한 회전 행동이 (rx, ry, rz)
-        를 한꺼번에 적용하므로 90도와 180도가 모두 '행동 한 번' 인데, 측지각은 1.5708 과
-        3.1416 을 준다. 그 결과 w = delta, neighbor_radius = 3*delta 에서 180도 떨어진
-        자세는 위치가 같아도 이웃이 될 수 없어(w*pi > 3*delta) 순수 회전 쌍 552 개 중
-        60.9% 만 이웃이 됐다. 지시함수에서는 100% 가 이웃 후보다.
-
-        지시함수는 metric 이다 — 24x24 전수 검증으로 대칭성·0 대각·분리성·삼각부등식을
-        확인했다.
-        """
         translation_distance = float(
             np.linalg.norm(
                 np.asarray(second_state.position) - np.asarray(first_state.position)
@@ -650,8 +828,8 @@ class RRTStarPlanner:
             return translation_distance
         return translation_distance + self.config.rotation_distance_weight
 
+    # 질의 상태와 가장 가까운 트리 노드 번호(모든 노드를 훑는다)
     def get_nearest_node(self, tree_nodes: List[_TreeNode], query_state: State) -> int:
-        """트리에서 질의 상태에 metric 상 가장 가까운 노드의 인덱스를 반환한다."""
         nearest_index = 0
         nearest_distance = float("inf")
         for node_index, node in enumerate(tree_nodes):
@@ -661,25 +839,23 @@ class RRTStarPlanner:
                 nearest_index = node_index
         return nearest_index
 
+    # 질의 상태에서 이웃 반경 안에 있는 트리 노드 번호들
     def get_neighbor_indices(
         self, tree_nodes: List[_TreeNode], query_state: State
     ) -> List[int]:
-        """질의 상태로부터 neighbor_radius 이내에 있는 트리 노드 인덱스 목록을 반환한다."""
         neighbor_indices: List[int] = list()
         for node_index, node in enumerate(tree_nodes):
             if self.get_state_distance(node.state, query_state) <= self.config.neighbor_radius:
                 neighbor_indices.append(node_index)
         return neighbor_indices
 
-    def sample_random_state(self) -> State:
-        """샘플링 경계 안에서 무작위 상태를 만든다(목표 편향 포함).
-
-        position 은 절대 위치가 아니라 이동량이므로, 부품의 시작 월드 AABB 가 확장된 샘플링
-        영역([sampling_lower, sampling_upper]) 안에 놓이도록 축별 이동량 범위를 잡아 샘플링한다.
-        """
+    # 무작위 상태 샘플. 목표 편향 비율의 확률로 목표 쪽 상태를 뽑고,
+    # 아니면 샘플링 범위 안의 무작위 위치를 뽑는다.
+    def sample_random_state(self, does_sample_rotation: bool) -> State:
         if self.random_generator.random() < self.config.goal_sample_rate:
             return self.get_goal_biased_state()
 
+        # 부품의 조립 상태 경계 상자가 샘플링 범위 안에 머무는 평행이동 범위
         translation_lower_bound = self.sampling_lower_bound - self.moving_start_lower_bound
         translation_upper_bound = self.sampling_upper_bound - self.moving_start_upper_bound
         sampled_position = self.random_generator.uniform(
@@ -687,34 +863,20 @@ class RRTStarPlanner:
         )
         return State(
             position=tuple(sampled_position),
-            rotation=self.sample_rotation(),
+            rotation=self.sample_rotation(does_sample_rotation),
         )
 
-    def sample_rotation(self) -> Tuple[int, int, int]:
-        """자세를 샘플링한다. 설정에 따라 무작위 고유 자세 또는 시작 자세를 반환한다."""
-        if not self.config.does_sample_rotation:
+    # 회전을 샘플링하지 않으면 시작 자세, 샘플링하면 24개 대표 자세 중 하나
+    def sample_rotation(self, does_sample_rotation: bool) -> Tuple[int, int, int]:
+        if not does_sample_rotation:
             return self.start_state.rotation
         rotation_index = int(self.random_generator.integers(len(_CANONICAL_ROTATION_EULERS)))
         return _CANONICAL_ROTATION_EULERS[rotation_index]
 
+    # 목표 쪽 샘플: 자유 방향(없으면 무작위 축·부호)으로 장애물 경계 상자를 목표 여유만큼
+    # 벗어난 위치에서, 0 ~ (장애물 경계 상자 폭 + 부품 폭)의 무작위 거리를 더 간 상태.
+    # 자세는 시작 자세 그대로다.
     def get_goal_biased_state(self) -> State:
-        """부품을 조립체 밖으로 곧게 밀어낸 목표 영역 쪽 상태를 만든다.
-
-        무작위 축과 방향(+/-)을 하나 골라, 시작(조립) 위치에서 '그 축으로만' 조립체 AABB 를
-        벗어난 위치를 만든다. 나머지 두 좌표는 시작 위치 값을 그대로 유지하고 자세도 시작
-        자세로 고정한다. 즉 축정렬 직선 뽑기(translational pull-out)를 목표로 편향한다.
-
-        스냅 핏(꽉 끼워 맞춘) 조립에서는 충돌 없이 움직일 수 있는 방향이 축에 정렬된 좁은
-        통로뿐인 경우가 많다. 다른 두 좌표까지 무작위로 흩뿌리면 대각선 목표가 되어
-        steer_toward 가 대각선으로 나아가다 즉시 충돌하고 통로를 따라 트리가 자라지 못한다.
-        따라서 목표 편향 샘플은 대각선이 아니라 축정렬 직선이어야 한다(전체 공간 탐색은
-        목표 편향이 아닌 균일 샘플이 담당한다).
-
-        나아가, 시작 상태에서 한 스텝이라도 곧게 밀 수 있었던 방향(free_escape_axis_directions)이
-        있으면 그 방향들 중에서만 축·부호를 골라 편향한다. 여섯 방향을 균일하게 고르면
-        막힌 방향(스냅 핏에서 대부분)으로 목표를 제안해 확장이 첫 스텝에서 무너지기 때문이다.
-        빠져나갈 통로가 실제로 있는 방향으로 목표를 집중시켜 좁은 축 통로 탐색을 가속한다.
-        """
         if len(self.free_escape_axis_directions) > 0:
             choice_index = int(
                 self.random_generator.integers(len(self.free_escape_axis_directions))
@@ -724,8 +886,6 @@ class RRTStarPlanner:
             axis_index = int(self.random_generator.integers(3))
             sign = 1 if bool(self.random_generator.integers(2)) else -1
 
-        # 목표는 '이동량'으로 계산한다. is_goal_reached 의 역산: 부품 시작 AABB 를 그 축으로
-        # 얼마나 밀어야 장애물 AABB 에서 removal_clearance 만큼 분리되는지 구한다.
         assembly_span = (
             self.obstacle_bounding_box[1, axis_index]
             - self.obstacle_bounding_box[0, axis_index]
@@ -760,11 +920,8 @@ class RRTStarPlanner:
             rotation=self.start_state.rotation,
         )
 
+    # from에서 to 쪽으로 최대 델타만큼 간 상태(자세는 to의 자세)
     def steer_toward(self, from_state: State, to_state: State) -> State:
-        """from_state 에서 to_state 방향으로 최대 step 만큼 나아간 새 상태를 만든다.
-
-        자세는 목표 자세를 그대로 채택하고(이산 도약), 위치는 step 이내로 전진한다.
-        """
         from_position = np.asarray(from_state.position, dtype=float)
         to_position = np.asarray(to_state.position, dtype=float)
         difference = to_position - from_position
@@ -779,35 +936,119 @@ class RRTStarPlanner:
             )
         return State(position=tuple(steered_position), rotation=to_state.rotation)
 
-    def is_goal_reached(self, state: State) -> bool:
-        """부품이 이 상태에서 조립체 밖으로 추출되었는지(AABB 분리) 여부를 반환한다."""
-        transformation_matrix = state.to_transformation_matrix()
+    # 주어진 상태에서 장애물 경계 상자와 가장 멀리 떨어진 (축, 부호, 분리량)
+    def get_best_escape_axis_direction(self, state: State) -> Tuple[int, int, float]:
         world_vertices = self._to_world_vertices(
-            self.moving_vertices_local, transformation_matrix
+            self.moving_vertices_local, state.to_transformation_matrix()
         )
-        moving_lower_bound = world_vertices.min(axis=0)
-        moving_upper_bound = world_vertices.max(axis=0)
+        return get_axis_aligned_separation(world_vertices, self.obstacle_bounding_box)
 
+    # 주어진 상태의 축·방향별 분리량(3x2)
+    def get_axis_separations_at(self, state: State) -> np.ndarray:
+        world_vertices = self._to_world_vertices(
+            self.moving_vertices_local, state.to_transformation_matrix()
+        )
+        return get_axis_separations(world_vertices, self.obstacle_bounding_box)
+
+    # 조립 상태에서 가장 열린 방향 (축, 부호, 열린 정도). 열린 정도가 같으면 분리량이 큰 쪽.
+    # 실패 진단의 기준 방향으로 쓰며, 한 번 계산하면 캐시한다.
+    def get_most_open_axis_direction(self) -> Tuple[int, int, float]:
+        if self._most_open_axis_direction is not None:
+            return self._most_open_axis_direction
+
+        moving_world_vertices = self._to_world_vertices(
+            self.moving_vertices_local, self.start_state.to_transformation_matrix()
+        )
+        obstacle_world_meshes = [
+            (
+                self._to_world_vertices(
+                    np.asarray(mesh.vertices, dtype=float),
+                    self.assembled_states[solid_id].to_transformation_matrix(),
+                ),
+                np.asarray(mesh.faces, dtype=np.int64),
+            )
+            for solid_id, mesh in self.solid_meshes.items()
+            if solid_id != self.moving_solid_id
+        ]
+        openness = get_axis_openness(
+            moving_world_vertices, self.moving_faces, obstacle_world_meshes, OPENNESS_COLUMN_COUNT
+        )
+        separations = get_axis_separations(moving_world_vertices, self.obstacle_bounding_box)
+
+        best_key: Optional[Tuple[float, float]] = None
+        best_direction = (0, -1)
         for axis_index in range(3):
-            positive_gap = (
-                self.obstacle_bounding_box[0, axis_index] - moving_upper_bound[axis_index]
-            )
-            negative_gap = (
-                moving_lower_bound[axis_index] - self.obstacle_bounding_box[1, axis_index]
-            )
-            if max(positive_gap, negative_gap) >= self.config.removal_clearance:
-                return True
-        return False
+            for sign_column in range(2):
+                key = (
+                    float(openness[axis_index, sign_column]),
+                    float(separations[axis_index, sign_column]),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_direction = (axis_index, _to_sign(sign_column))
+        self._most_open_axis_direction = (
+            best_direction[0],
+            best_direction[1],
+            float(openness[best_direction[0], _to_sign_column(best_direction[1])]),
+        )
+        return self._most_open_axis_direction
 
+    # 진단용 가장 가까운 경로 (상태들, 동작들, 분리량). 성공이면 그 경로를,
+    # 실패면 가장 열린 방향으로 가장 멀리 간 경로를 돌려준다.
+    def get_closest_path(
+        self, result: PlanningResult
+    ) -> Tuple[Tuple[State, ...], Tuple[Action, ...], float]:
+        if result.is_success:
+            return (
+                result.states,
+                result.actions,
+                self.get_separation_from_obstacles(result.states[-1]),
+            )
+        axis_index, sign, _ = self.get_most_open_axis_direction()
+        return result.farthest_paths[axis_index * 2 + _to_sign_column(sign)]
+
+    # 여섯 방향 분리량 중 최댓값
+    def get_separation_from_obstacles(self, state: State) -> float:
+        return self.get_best_escape_axis_direction(state)[2]
+
+    # 최대 분리량이 목표 여유 이상이면 분해된 것으로 본다.
+    def is_goal_reached(self, state: State) -> bool:
+        return self.get_separation_from_obstacles(state) >= self.config.removal_clearance
+
+    # from 상태에서 가장 열린 방향으로 목표 여유까지 직선으로 밀어 보며, 처음 허용 상한을
+    # 넘는 상태를 찾는다. 이미 분해되었거나 끝까지 막히지 않으면 None.
+    def get_first_blocked_state(self, from_state: State) -> Optional[State]:
+        if self.is_goal_reached(from_state):
+            return None
+        axis_index, sign, _ = self.get_most_open_axis_direction()
+        separation = float(
+            self.get_axis_separations_at(from_state)[axis_index, _to_sign_column(sign)]
+        )
+        remaining_distance = self.config.removal_clearance - separation
+        if remaining_distance <= 0.0:
+            return None
+
+        start_position = np.asarray(from_state.position, dtype=float)
+        goal_position = start_position.copy()
+        goal_position[axis_index] += sign * remaining_distance
+        goal_state = State(position=tuple(goal_position), rotation=from_state.rotation)
+
+        interpolation_count = self._straight_interpolation_count_for(from_state, goal_state)
+        for interpolation_index in range(1, interpolation_count):
+            interpolation_ratio = interpolation_index / (interpolation_count - 1)
+            interpolated_position = (
+                start_position + (goal_position - start_position) * interpolation_ratio
+            )
+            candidate_state = State(
+                position=tuple(interpolated_position), rotation=from_state.rotation
+            )
+            if not self.collision_session.is_valid_state(candidate_state):
+                return candidate_state
+        return None
+
+    # 조립 상태에서 첫 동작이 하나라도 가능한지: 바로 움직일 수 있는 방향이 있거나,
+    # 무게 중심 기준으로 다른 23개 자세 중 하나로 간섭 없이 돌 수 있으면 True.
     def has_any_feasible_first_move(self) -> bool:
-        """[Tier 0] 시작 상태에서 한 스텝이라도 움직일 수 있는지 값싸게 판정한다.
-
-        여섯 축정렬 병진(free_escape_axis_directions, 생성 시 이미 계산) 중 하나라도
-        있으면 True. 없으면 24개 이산 회전 각각을 부품 무게중심 기준으로 제자리 적용해
-        회전 스윕이 유효한지 검사한다(회전으로만 첫 탈출이 열리는 경우 포착). 모두 막혀
-        있으면 False — 이 상태에서는 어떤 단위 동작으로도 못 움직이므로 RRT* 를 돌릴 필요가
-        없다(필요조건 기각). RRT* 한 번 대비 수 밀리초로 끝난다.
-        """
         if len(self.free_escape_axis_directions) > 0:
             return True
         current_rotation_matrix = self.start_state.to_rotation_matrix()
@@ -815,9 +1056,6 @@ class RRTStarPlanner:
         world_centroid = (
             current_rotation_matrix @ self.moving_centroid_local + current_position
         )
-        # 24 개 이산 회전을 무게중심 고정 제자리 회전으로 배치해 회전 스윕을 검사한다
-        # (회전으로만 첫 탈출이 열리는 경우 포착). 순차인 것은 의도다 — manifold3d 가
-        # 불린 하나에 이미 여러 코어를 쓰므로 스레드를 더 붙이면 경쟁해서 느려진다.
         for euler in _CANONICAL_ROTATION_EULERS:
             if tuple(euler) == tuple(self.start_state.rotation):
                 continue
@@ -833,112 +1071,179 @@ class RRTStarPlanner:
                 continue
         return False
 
-    def try_straight_extraction(self) -> Optional[PlanningResult]:
-        """[Tier 1] 시작에서 곧게 밀어 바로 추출되는지(회전 없이) 값싸게 시도한다.
-
-        시작 상태에서 곧게 밀 수 있던 각 자유 축·부호에 대해, 그 축으로 목표 편향
-        추출 위치(장애물 AABB + removal_clearance 를 넘는 이동량)까지 하나의 병진으로
-        갈 수 있는지 스윕 검사한다. 성공하면 (시작, 목표) 두 상태 + 병진 1개짜리
-        PlanningResult 를 즉시 반환한다. RRT* 없이 대부분의 '쉬운' 부품을 여기서 해소한다.
-
-        스냅 핏의 좁은 축 통로에서 실제로 빠져나갈 수 있는 방향은 대개 자유 축뿐이므로,
-        free_escape_axis_directions 방향만 시도한다. 실패하면 None 을 반환하고 상위에서
-        풀 RRT* (Tier 2)로 넘어간다.
-        """
-        for axis_index, sign in self.free_escape_axis_directions:
-            assembly_span = (
+    # 조립 상태에서 axis·sign 방향으로 장애물 경계 상자를 목표 여유만큼 벗어나는 데 필요한
+    # 이동량(부호 포함)
+    def _get_clearing_translation(self, axis_index: int, sign: int) -> float:
+        if sign > 0:
+            return float(
                 self.obstacle_bounding_box[1, axis_index]
-                - self.obstacle_bounding_box[0, axis_index]
-            )
-            moving_span = (
-                self.moving_start_upper_bound[axis_index]
+                + self.config.removal_clearance
+                + _EXTRACTION_BOUNDARY_MARGIN
                 - self.moving_start_lower_bound[axis_index]
             )
-            if sign > 0:
-                clearing_translation = (
-                    self.obstacle_bounding_box[1, axis_index]
-                    + self.config.removal_clearance
-                    - self.moving_start_lower_bound[axis_index]
-                )
-            else:
-                clearing_translation = (
-                    self.obstacle_bounding_box[0, axis_index]
-                    - self.config.removal_clearance
-                    - self.moving_start_upper_bound[axis_index]
-                )
-            goal_position = np.asarray(self.start_state.position, dtype=float).copy()
-            goal_position[axis_index] = (
-                self.start_state.position[axis_index] + clearing_translation
-            )
-            goal_state = State(position=tuple(goal_position), rotation=self.start_state.rotation)
-            if not self.is_goal_reached(goal_state):
-                continue
-            if not self.collision_session.is_valid_state(goal_state):
-                continue
+        return float(
+            self.obstacle_bounding_box[0, axis_index]
+            - self.config.removal_clearance
+            - _EXTRACTION_BOUNDARY_MARGIN
+            - self.moving_start_upper_bound[axis_index]
+        )
+
+    # 직선 분해 한 번: lateral_offset만큼 옆으로 비킨 뒤(0이면 생략) axis·sign 방향으로
+    # 곧장 빼낸다. 모든 구간이 간섭 없으면 성공 결과, 아니면 None.
+    def _try_straight_pull(
+        self, lateral_offset: np.ndarray, axis_index: int, sign: int
+    ) -> Optional[PlanningResult]:
+        lateral_position = np.asarray(self.start_state.position, dtype=float) + lateral_offset
+        lateral_state = State(position=tuple(lateral_position), rotation=self.start_state.rotation)
+        goal_position = lateral_position.copy()
+        goal_position[axis_index] += self._get_clearing_translation(axis_index, sign)
+        goal_state = State(position=tuple(goal_position), rotation=self.start_state.rotation)
+        if not self.is_goal_reached(goal_state):
+            return None
+
+        path_states = [self.start_state]
+        if np.any(lateral_offset != 0.0):
+            if not self.collision_session.is_valid_state(lateral_state):
+                return None
             if not self._segment_valid(
                 self.start_state,
-                goal_state,
-                self._interpolation_count_for(self.start_state, goal_state),
+                lateral_state,
+                self._straight_interpolation_count_for(self.start_state, lateral_state),
             ):
-                continue
-            translation_action = Action(
+                return None
+            path_states.append(lateral_state)
+        if not self.collision_session.is_valid_state(goal_state):
+            return None
+        if not self._segment_valid(
+            lateral_state,
+            goal_state,
+            self._straight_interpolation_count_for(lateral_state, goal_state),
+        ):
+            return None
+        path_states.append(goal_state)
+
+        translation_actions = tuple(
+            Action(
                 action_type=ActionType.TRANSLATION,
                 value=tuple(
-                    np.asarray(goal_state.position, dtype=float)
-                    - np.asarray(self.start_state.position, dtype=float)
+                    np.asarray(next_state.position, dtype=float)
+                    - np.asarray(previous_state.position, dtype=float)
                 ),
             )
-            cost = self.get_state_distance(self.start_state, goal_state)
-            return PlanningResult(
-                is_success=True,
-                states=(self.start_state, goal_state),
-                actions=(translation_action,),
-                cost=float(cost),
-                iteration_count=0,
-            )
+            for previous_state, next_state in zip(path_states[:-1], path_states[1:])
+        )
+        cost = sum(
+            self.get_state_distance(previous_state, next_state)
+            for previous_state, next_state in zip(path_states[:-1], path_states[1:])
+        )
+        return PlanningResult(
+            is_success=True,
+            states=tuple(path_states),
+            actions=translation_actions,
+            cost=float(cost),
+            iteration_count=0,
+            farthest_paths=tuple(),
+        )
+
+    # Tier1 직선 분해: 바로 움직일 수 있는 방향마다 곧장 빼 본다.
+    def try_straight_extraction(self) -> Optional[PlanningResult]:
+        for axis_index, sign in self.free_escape_axis_directions:
+            result = self._try_straight_pull(np.zeros(3, dtype=float), axis_index, sign)
+            if result is not None:
+                return result
+
+        # 안 되면 가장 열린 방향에 수직인 두 축으로 ±델타 비킨 뒤 빼 본다.
+        open_axis_index, open_sign, _ = self.get_most_open_axis_direction()
+        for perpendicular_axis_index in _PLANE_AXIS_INDICES[open_axis_index]:
+            for side in (1, -1):
+                lateral_offset = np.zeros(3, dtype=float)
+                lateral_offset[perpendicular_axis_index] = side * self.config.translation_step_size
+                result = self._try_straight_pull(lateral_offset, open_axis_index, open_sign)
+                if result is not None:
+                    return result
         return None
 
+    # 첫 동작부터 불가능할 때의 실패 결과. 6방향 모두 조립 상태 하나만 담은 경로로 채운다.
+    def _to_immobile_result(self) -> PlanningResult:
+        start_separations = self.get_axis_separations_at(self.start_state)
+        return PlanningResult(
+            is_success=False,
+            states=tuple(),
+            actions=tuple(),
+            cost=float("inf"),
+            iteration_count=0,
+            farthest_paths=tuple(
+                ((self.start_state,), tuple(), float(start_separations[axis_index, sign_column]))
+                for axis_index in range(3)
+                for sign_column in range(2)
+            ),
+        )
+
+    # 전체 탐색: 첫 동작 가능 여부 → 직선 분해 → 단계적 RRT*
     def execute_search(self) -> PlanningResult:
-        """RRT* 탐색을 수행하고 분해 경로 결과를 반환한다.
-
-        목표에 도달하는 경로를 찾으면 시작->목표 상태·동작 나열과 총 비용을 담아 반환한다.
-        max_iteration_count 안에 찾지 못하면 is_success=False 결과를 반환한다.
-
-        계층적 오라클: 풀 RRT* 를 돌리기 전에 두 값싼 단계를 먼저 시도한다.
-          - [Tier 0] has_any_feasible_first_move(): 어떤 단위 동작으로도 못 움직이면
-            (모든 축 병진·모든 회전이 막힘) 즉시 실패 반환. RRT* 반복 낭비를 막는다.
-          - [Tier 1] try_straight_extraction(): 자유 축으로 곧게 밀어 한 번에 추출되면
-            그 1-병진 경로를 즉시 반환. 대부분의 '쉬운' 부품을 RRT* 없이 해소한다.
-        두 단계 모두 정확한 판정(거짓 양성 없음)이며, 여기서 결판나지 않는 애매한 소수만
-        Tier 2(아래의 풀 RRT*)로 넘어간다.
-        """
         if not self.has_any_feasible_first_move():
-            return PlanningResult(
-                is_success=False,
-                states=tuple(),
-                actions=tuple(),
-                cost=float("inf"),
-                iteration_count=0,
-            )
+            return self._to_immobile_result()
         straight_result = self.try_straight_extraction()
         if straight_result is not None:
             return straight_result
+        return self._execute_staged_tree_search()
 
+    # 직선 분해 없이 단계적 RRT*만 실행한다.
+    def execute_tree_search(self) -> PlanningResult:
+        if not self.has_any_feasible_first_move():
+            return self._to_immobile_result()
+        return self._execute_staged_tree_search()
+
+    # Tier2 RRT*: 평행이동만 샘플링해 먼저 탐색하고, 실패하면(회전 허용 시) 회전까지
+    # 샘플링해 다시 탐색한다. 둘 다 실패하면 방향마다 더 멀리 간 경로를 진단용으로 남긴다.
+    def _execute_staged_tree_search(self) -> PlanningResult:
+        translation_result = self._execute_tree_search(does_sample_rotation=False)
+        translation_iteration_count = translation_result.iteration_count
+        if translation_result.is_success or not self.config.does_sample_rotation:
+            return replace(
+                translation_result, translation_iteration_count=translation_iteration_count
+            )
+
+        rotation_result = self._execute_tree_search(does_sample_rotation=True)
+        if rotation_result.is_success:
+            farthest_paths = rotation_result.farthest_paths
+        else:
+            farthest_paths = tuple(
+                max(translation_path, rotation_path, key=lambda path: path[2])
+                for translation_path, rotation_path in zip(
+                    translation_result.farthest_paths, rotation_result.farthest_paths
+                )
+            )
+        return replace(
+            rotation_result,
+            iteration_count=translation_iteration_count + rotation_result.iteration_count,
+            farthest_paths=farthest_paths,
+            translation_iteration_count=translation_iteration_count,
+            rotation_iteration_count=rotation_result.iteration_count,
+        )
+
+    # RRT* 본체: 샘플 → 최근접 노드 → 델타씩 연속 확장 → 부모 선택과 재연결.
+    # 새 노드가 목표 여유 이상 떨어지면 목표 후보로 기록한다.
+    def _execute_tree_search(self, does_sample_rotation: bool) -> PlanningResult:
+        # 단계마다 같은 시드로 난수를 다시 시작해 결과를 재현할 수 있게 한다.
+        self.random_generator = np.random.default_rng(self.config.random_seed)
         tree_nodes: List[_TreeNode] = [
             _TreeNode(state=self.start_state, parent_index=None, cost_from_start=0.0)
         ]
         best_goal_index: Optional[int] = None
         best_goal_cost = float("inf")
+        # 방향별 최대 분리량과 그 노드 번호(실패 진단용)
+        farthest_separations = self.get_axis_separations_at(self.start_state)
+        farthest_node_indices = np.zeros((3, 2), dtype=np.int64)
 
         performed_iteration_count = 0
         for iteration_index in range(self.config.max_iteration_count):
             performed_iteration_count = iteration_index + 1
 
-            sampled_state = self.sample_random_state()
+            sampled_state = self.sample_random_state(does_sample_rotation)
             source_index = self.get_nearest_node(tree_nodes, sampled_state)
 
-            # 샘플 방향으로 충돌 전까지 연속 확장한다(RRT-Connect 식 탐욕 확장).
-            # 좁은 축 통로에서 한 번의 반복만으로 부품을 끝까지 밀어낼 수 있다.
+            # 샘플을 향해 델타씩 뻗는다. 간섭이 생기거나 샘플에 닿으면 멈춘다.
             for _ in range(self.config.maximum_extension_step_count):
                 source_state = tree_nodes[source_index].state
                 new_state = self.steer_toward(source_state, sampled_state)
@@ -951,27 +1256,46 @@ class RRTStarPlanner:
 
                 new_node_index = self._insert_node(tree_nodes, source_index, new_state)
 
-                if self.is_goal_reached(new_state):
+                # 방향별 최대 분리량을 갱신하고, 목표 여유 이상 떨어졌으면
+                # 비용이 가장 낮은 목표 노드로 기록한다.
+                new_separations = self.get_axis_separations_at(new_state)
+                is_farther = new_separations > farthest_separations
+                farthest_separations[is_farther] = new_separations[is_farther]
+                farthest_node_indices[is_farther] = new_node_index
+                new_separation = float(new_separations.max())
+                if new_separation >= self.config.removal_clearance:
                     if tree_nodes[new_node_index].cost_from_start < best_goal_cost:
                         best_goal_cost = tree_nodes[new_node_index].cost_from_start
                         best_goal_index = new_node_index
 
-                # 목표 샘플에 도달했으면 확장을 멈춘다.
                 if new_state == sampled_state:
                     break
                 source_index = new_node_index
 
-            # 최고 속도 우선: 첫 실현 가능 경로를 찾으면 즉시 중단한다.
+            # 첫 경로에서 멈추는 설정이면 여기서 끝낸다.
             if self.config.stops_at_first_feasible_path and best_goal_index is not None:
                 break
 
+        # 실패: 방향마다 가장 멀리 간 노드까지의 경로를 진단용으로 만든다.
         if best_goal_index is None:
+            farthest_paths = list()
+            for axis_index in range(3):
+                for sign_column in range(2):
+                    path_states, path_actions = self.build_path(
+                        tree_nodes, int(farthest_node_indices[axis_index, sign_column])
+                    )
+                    farthest_paths.append((
+                        tuple(path_states),
+                        tuple(path_actions),
+                        float(farthest_separations[axis_index, sign_column]),
+                    ))
             return PlanningResult(
                 is_success=False,
                 states=tuple(),
                 actions=tuple(),
                 cost=float("inf"),
                 iteration_count=performed_iteration_count,
+                farthest_paths=tuple(farthest_paths),
             )
 
         states, actions = self.build_path(tree_nodes, best_goal_index)
@@ -981,15 +1305,13 @@ class RRTStarPlanner:
             actions=tuple(actions),
             cost=best_goal_cost,
             iteration_count=performed_iteration_count,
+            farthest_paths=tuple(),
         )
 
+    # 새 상태를 트리에 넣는다: 이웃 중 비용이 가장 낮은 부모를 고르고, 이웃을 재연결한다.
     def _insert_node(
         self, tree_nodes: List[_TreeNode], source_index: int, new_state: State
     ) -> int:
-        """new_state 를 RRT* 규칙(최소비용 부모 선택 + 이웃 재배선)으로 트리에 넣고 인덱스를 반환한다.
-
-        source_index 는 확장의 출발 노드로, 이웃이 하나도 없을 때의 기본 부모가 된다.
-        """
         neighbor_indices = self.get_neighbor_indices(tree_nodes, new_state)
         parent_index, parent_cost = self._choose_parent(
             tree_nodes, neighbor_indices, source_index, new_state
@@ -1005,6 +1327,8 @@ class RRTStarPlanner:
         self._rewire_neighbors(tree_nodes, neighbor_indices, new_node_index)
         return new_node_index
 
+    # 최근접 노드를 기본 부모로 두고, 이웃 중 누적 비용이 더 낮고 간섭 없이 이어지는
+    # 노드가 있으면 그 노드를 부모로 삼는다.
     def _choose_parent(
         self,
         tree_nodes: List[_TreeNode],
@@ -1012,7 +1336,6 @@ class RRTStarPlanner:
         nearest_index: int,
         new_state: State,
     ) -> Tuple[int, float]:
-        """이웃 중 new_state 로의 유효 간선이 있고 누적 비용이 최소인 부모를 고른다."""
         best_parent_index = nearest_index
         best_cost = tree_nodes[nearest_index].cost_from_start + self.get_state_distance(
             tree_nodes[nearest_index].state, new_state
@@ -1028,13 +1351,14 @@ class RRTStarPlanner:
                 best_parent_index = neighbor_index
         return best_parent_index, best_cost
 
+    # 새 노드를 거치는 편이 더 싸고 간섭 없이 이어지는 이웃은 부모를 새 노드로 바꾼다
+    # (RRT* 재연결).
     def _rewire_neighbors(
         self,
         tree_nodes: List[_TreeNode],
         neighbor_indices: List[int],
         new_node_index: int,
     ) -> None:
-        """new_node 를 거치면 더 싼 이웃들을 new_node 의 자식으로 재배선한다."""
         new_node = tree_nodes[new_node_index]
         for neighbor_index in neighbor_indices:
             if neighbor_index == new_node.parent_index:
@@ -1048,33 +1372,32 @@ class RRTStarPlanner:
                 tree_nodes[neighbor_index].parent_index = new_node_index
                 tree_nodes[neighbor_index].cost_from_start = candidate_cost
 
+    # 목표 노드에서 부모를 따라 루트까지 올라간 뒤 순서를 뒤집는다.
     def build_path(
         self, tree_nodes: List[_TreeNode], goal_index: int
     ) -> Tuple[List[State], List[Action]]:
-        """목표 노드에서 부모를 거슬러 올라가 시작->목표 상태·동작 나열을 만든다."""
-        state_path: List[State] = list()
+        node_states: List[State] = list()
         node_index: Optional[int] = goal_index
         while node_index is not None:
-            state_path.append(tree_nodes[node_index].state)
+            node_states.append(tree_nodes[node_index].state)
             node_index = tree_nodes[node_index].parent_index
-        state_path.reverse()
+        node_states.reverse()
 
+        # 노드 사이를 동작(회전 → 평행이동) 단위로 펼친다.
+        state_path: List[State] = [node_states[0]]
         action_path: List[Action] = list()
-        for segment_index in range(len(state_path) - 1):
-            for action, _ in self.get_edge_actions(
-                state_path[segment_index], state_path[segment_index + 1]
+        for segment_index in range(len(node_states) - 1):
+            for action, resulting_state in self.get_edge_actions(
+                node_states[segment_index], node_states[segment_index + 1]
             ):
                 action_path.append(action)
+                state_path.append(resulting_state)
         return state_path, action_path
 
+    # 분해 경로를 뒤집어 조립 경로(분해된 상태 → 조립 상태)와 그 동작들을 만든다.
     def to_assembly_path(
         self, disassembly_result: PlanningResult
     ) -> Tuple[List[State], List[Action]]:
-        """분해 결과를 뒤집어 조립 경로(상태·동작 나열)를 만든다.
-
-        분해 상태 나열을 역순으로 놓고 이웃 상태 사이의 동작을 다시 계산해, 조립 방향의
-        상태·동작 나열을 반환한다.
-        """
         if not disassembly_result.is_success:
             raise PlanningException("cannot build an assembly path from a failed disassembly result")
 
