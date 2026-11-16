@@ -1,13 +1,20 @@
+# 부품 사이의 간섭 판정.
+# B-rep 솔리드를 삼각분할하고 닫힌 manifold로 복구한 뒤, manifold3d 불린 교집합 부피 V로
+# 간섭 길이 L = V^(1/3)을 잰다. 부품 쌍마다 조립 상태의 간섭 길이(L0)를 기준값으로 두고,
+# 허용 상한(= L0 + 간섭 증가 허용치)을 넘으면 간섭으로 판정한다.
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 
+# 간섭 판정 중 문제가 생겼을 때 발생시키는 예외
 class InterferenceException(Exception):
     pass
 
 
+# OCC로 솔리드를 삼각분할해 (정점, 면) 배열을 만든다.
+# 면 경계에서 좌표가 같은(merge_digits 자리 반올림) 정점은 하나로 합쳐 면 사이 연결을 유지한다.
 def triangulate_solid_preserving_topology(
     shape,
     linear_deflection: float = 0.02,
@@ -22,11 +29,13 @@ def triangulate_solid_preserving_topology(
     from OCC.Core.TopLoc import TopLoc_Location
     from OCC.Core.TopoDS import topods
 
+    # 기존 삼각분할을 지우고 선형·각도 허용 오차로 다시 삼각분할한다.
     breptools.Clean(shape)
     BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
 
     vertices: List[List[float]] = list()
     faces: List[List[int]] = list()
+    # 반올림한 좌표 → 정점 번호(같은 좌표의 정점을 하나로 합친다)
     index_of_coordinate: Dict[Tuple[float, float, float], int] = dict()
 
     explorer = TopExp_Explorer(shape, TopAbs_FACE)
@@ -35,7 +44,9 @@ def triangulate_solid_preserving_topology(
         location = TopLoc_Location()
         triangulation = BRep_Tool.Triangulation(face, location)
         if triangulation is not None:
+            # 면 삼각분할의 노드는 location 변환을 적용해야 형상 좌표가 된다.
             transformation = location.Transformation()
+            # 방향이 뒤집힌 면은 꼭짓점 순서를 바꿔 법선이 바깥을 향하게 한다.
             is_reversed = face.Orientation() == TopAbs_REVERSED
             local_indices: List[int] = list()
             for node_number in range(1, triangulation.NbNodes() + 1):
@@ -51,6 +62,7 @@ def triangulate_solid_preserving_topology(
                     index_of_coordinate[coordinate] = global_index
                     vertices.append([point.X(), point.Y(), point.Z()])
                 local_indices.append(global_index)
+            # OCC 번호는 1부터 시작한다. 정점을 합쳐 퇴화한 삼각형은 버린다.
             for triangle_number in range(1, triangulation.NbTriangles() + 1):
                 first, second, third = triangulation.Triangle(triangle_number).Get()
                 a = local_indices[first - 1]
@@ -64,6 +76,8 @@ def triangulate_solid_preserving_topology(
     return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=np.int64)
 
 
+# (정점, 면)으로 manifold3d.Manifold를 만든다. 생성에 실패하거나 부피가 minimum_volume
+# 이하이면 None이다(닫히지 않은 메쉬는 빈 manifold가 되어 부피가 0이다).
 def _build_manifold(vertices: np.ndarray, faces: np.ndarray, minimum_volume: float):
     import manifold3d
 
@@ -80,6 +94,8 @@ def _build_manifold(vertices: np.ndarray, faces: np.ndarray, minimum_volume: flo
     return manifold
 
 
+# tolerance 간격 격자로 반올림해 가까운 정점을 하나로 합치고,
+# 퇴화한 삼각형과 꼭짓점 집합이 같은 중복 삼각형을 지운다.
 def _weld_vertices(vertices: np.ndarray, faces: np.ndarray, tolerance: float):
     keys = np.round(vertices / tolerance) * tolerance if tolerance > 0 else vertices
     _, first_index, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
@@ -96,6 +112,8 @@ def _weld_vertices(vertices: np.ndarray, faces: np.ndarray, tolerance: float):
     return new_vertices, new_faces[np.sort(unique_index)]
 
 
+# 한 모서리를 셋 이상의 삼각형이 공유하면(비다양체) 넓이가 큰 두 개만 남긴다.
+# 반환: (남은 면, 지운 면 수)
 def _drop_nonmanifold_faces(vertices: np.ndarray, faces: np.ndarray):
     triangle = vertices[faces]
     areas = 0.5 * np.linalg.norm(
@@ -118,6 +136,8 @@ def _drop_nonmanifold_faces(vertices: np.ndarray, faces: np.ndarray):
     return faces[keep], len(removed)
 
 
+# 모서리로 이어진 삼각형을 차례로 따라가며 꼭짓점 순서(면 방향)를 하나로 맞춘다.
+# 이웃이 공유 모서리를 같은 방향으로 쓰면 그 이웃을 뒤집는다. 반환: (맞춘 면, 뒤집은 수)
 def _unify_orientation(faces: np.ndarray):
     edge_map: Dict[Tuple[int, int], List[int]] = dict()
     for index, (a, b, c) in enumerate(faces):
@@ -148,6 +168,7 @@ def _unify_orientation(faces: np.ndarray):
     return result, flip_count
 
 
+# 반대 방향 짝이 없는 방향 모서리(열린 모서리)를 이어 구멍 경계 고리들을 찾는다.
 def _boundary_loops(faces: np.ndarray) -> List[List[int]]:
     directed = set()
     for a, b, c in faces:
@@ -174,6 +195,7 @@ def _boundary_loops(faces: np.ndarray) -> List[List[int]]:
                 break
             loop.append(following)
             current = following
+            # 비정상 입력에서 끝없이 도는 것을 막는 안전장치
             if len(loop) > 100000:
                 break
         if len(loop) >= 3:
@@ -181,6 +203,7 @@ def _boundary_loops(faces: np.ndarray) -> List[List[int]]:
     return loops
 
 
+# 경계 고리의 중심점과 크기(점들의 경계 상자 대각선 길이)
 def _loop_frame(vertices: np.ndarray, loop: List[int]) -> Tuple[np.ndarray, float]:
     points = vertices[loop]
     centre = points.mean(axis=0)
@@ -188,6 +211,9 @@ def _loop_frame(vertices: np.ndarray, loop: List[int]) -> Tuple[np.ndarray, floa
     return centre, diameter
 
 
+# 서로 마주 보는 경계 고리 쌍을 고른다. 두 고리 점 사이 최근접 거리의 중앙값이
+# 작은 고리 크기의 25% 미만인 쌍을 후보로 두고, 가까운 쌍부터 겹치지 않게 짝짓는다.
+# 반환: (짝 목록, 짝 없는 고리 번호 목록)
 def _pair_facing_loops(vertices: np.ndarray, loops: List[List[int]]):
     if len(loops) < 2:
         return [], list(range(len(loops)))
@@ -218,6 +244,7 @@ def _pair_facing_loops(vertices: np.ndarray, loops: List[List[int]]):
     return pairs, unpaired
 
 
+# 두 고리를 둘레 진행 비율이 맞도록 번갈아 전진하며 삼각형 strip으로 잇는다.
 def _zip_loops(vertices: np.ndarray, first: List[int], second: List[int]):
     triangles = []
     i = j = 0
@@ -243,6 +270,8 @@ def _zip_loops(vertices: np.ndarray, first: List[int], second: List[int]):
     return triangles
 
 
+# 두 고리를 삼각형 strip으로 잇는다(복구 라벨의 '띠'). 두 번째 고리를 정방향과 역방향으로
+# 각각 시작점을 맞춰 이어 보고, 삼각형 최장 모서리 합이 작은 쪽을 고른다.
 def _bridge_loops(vertices: np.ndarray, first_loop: List[int], second_loop: List[int]):
     first = list(first_loop)
     second = list(second_loop)
@@ -270,11 +299,15 @@ def _bridge_loops(vertices: np.ndarray, first_loop: List[int], second_loop: List
     return forward if strip_cost(forward) <= strip_cost(backward) else backward
 
 
+# 고리 중심 정점(centre_index)과 고리 모서리로 부채꼴 삼각형을 만들어 구멍을 막는다
+# (복구 라벨의 '덮개').
 def _star_cap(vertices: np.ndarray, loop: List[int], centre_index: int):
     return [(loop[position], loop[(position + 1) % len(loop)], centre_index)
             for position in range(len(loop))]
 
 
+# 짝지은 고리는 strip으로 잇고, 짝 없는 고리는 중심 정점을 추가해 cap으로 막는다.
+# 반환: (정점, 면, 추가한 면 수)
 def _apply_closure(vertices: np.ndarray, faces: np.ndarray, loops, pairs, unpaired):
     added = []
     for i, j in pairs:
@@ -295,6 +328,9 @@ def _apply_closure(vertices: np.ndarray, faces: np.ndarray, loops, pairs, unpair
     return new_vertices, new_faces, len(added)
 
 
+# 구멍을 막은 후보 메쉬 목록. 짝이 있으면 마주 보는 고리를 strip으로 잇고 나머지를 cap으로
+# 막은 후보를 먼저, 모든 고리를 cap으로 막은 후보를 그다음에 둔다.
+# 후보마다 (정점, 면, 추가한 면 수, strip 쌍 수, cap 수)
 def _close_boundaries(vertices: np.ndarray, faces: np.ndarray):
     loops = _boundary_loops(faces)
     if not loops:
@@ -316,6 +352,7 @@ def _close_boundaries(vertices: np.ndarray, faces: np.ndarray):
     return candidates
 
 
+# 삼각형과 원점이 이루는 사면체의 부호 있는 부피 합. 음수면 면 방향이 안쪽을 향한다.
 def _signed_volume(vertices: np.ndarray, faces: np.ndarray) -> float:
     triangle = vertices[faces]
     return float(
@@ -323,6 +360,11 @@ def _signed_volume(vertices: np.ndarray, faces: np.ndarray) -> float:
     )
 
 
+# 메쉬를 닫힌 manifold로 만들 때까지 단계적으로 복구한다.
+#   1) 그대로 → 라벨 '직접'
+#   2) 정점 용접 + 비다양체 면 제거 + 방향 통일 → '용접+비다양체N+방향M'
+#   3) 구멍을 strip/cap으로 막은 후보 → '...+구멍(띠N쌍+덮개M개, K면)'
+# 반환: (정점, 면, manifold 또는 None, 복구 라벨). 모두 실패하면 라벨 끝에 ' 실패'가 붙는다.
 def repair_mesh_geometry(vertices: np.ndarray, faces: np.ndarray, minimum_volume: float):
     vertices = np.asarray(vertices, dtype=float)
     faces = np.asarray(faces, dtype=np.int64)
@@ -331,6 +373,7 @@ def repair_mesh_geometry(vertices: np.ndarray, faces: np.ndarray, minimum_volume
     if direct is not None:
         return vertices, faces, direct, "직접"
 
+    # 용접 허용 오차 = 메쉬 경계 상자 대각선 길이의 1e-6배
     extent = vertices.max(axis=0) - vertices.min(axis=0)
     scale = float(np.linalg.norm(extent))
     tolerance = 1e-6 * scale if scale > 0 else 0.0
@@ -338,6 +381,7 @@ def repair_mesh_geometry(vertices: np.ndarray, faces: np.ndarray, minimum_volume
     work_vertices, work_faces = _weld_vertices(vertices, faces, tolerance)
     work_faces, dropped = _drop_nonmanifold_faces(work_vertices, work_faces)
     work_faces, flips = _unify_orientation(work_faces)
+    # 부피가 음수면 모든 면을 뒤집어 바깥 방향으로 맞춘다.
     if _signed_volume(work_vertices, work_faces) < 0:
         work_faces = work_faces[:, ::-1]
     label = f"용접+비다양체{dropped}+방향{flips}"
@@ -345,6 +389,7 @@ def repair_mesh_geometry(vertices: np.ndarray, faces: np.ndarray, minimum_volume
     if candidate is not None:
         return work_vertices, work_faces, candidate, label
 
+    # 그래도 닫히지 않으면 구멍을 막은 후보를 차례로 시도한다.
     closures = _close_boundaries(work_vertices, work_faces)
 
     attempts = []
@@ -355,6 +400,7 @@ def repair_mesh_geometry(vertices: np.ndarray, faces: np.ndarray, minimum_volume
         if capped:
             detail.append(f"덮개{capped}개")
         attempt_label = f"{label}+구멍({'+'.join(detail)}, {added}면)"
+        # 막은 그대로와 방향을 다시 통일한 것 두 가지를 시도한다.
         unified_faces, _ = _unify_orientation(filled_faces)
         for candidate_faces in (filled_faces, unified_faces):
             oriented = candidate_faces
@@ -367,17 +413,21 @@ def repair_mesh_geometry(vertices: np.ndarray, faces: np.ndarray, minimum_volume
     return work_vertices, work_faces, None, (attempts[0] if attempts else label) + " 실패"
 
 
+# repair_mesh_geometry 결과를 (manifold, 복구된 정점, 라벨) 순서로 돌려주는 래퍼
 def repair_to_manifold(vertices: np.ndarray, faces: np.ndarray, minimum_volume: float):
     repaired_vertices, _, manifold, label = repair_mesh_geometry(vertices, faces, minimum_volume)
     return manifold, repaired_vertices, label
 
 
+# 겹침 부피 V를 길이로 바꾼다: L = V^(1/3) (V ≤ 0이면 0)
 def interference_length(volume: float) -> float:
     if volume <= 0.0:
         return 0.0
     return float(volume) ** (1.0 / 3.0)
 
 
+# 움직이는 솔리드와 장애물 솔리드의 모든 쌍에 대해 교집합 부피를 더한다.
+# 경계 상자가 떨어진 쌍은 건너뛴다. manifold3d에서 ^ 는 교집합이다.
 def _sum_pairwise_intersection_volume(moving_solids: List[object], obstacle_solids: List[object]) -> float:
     total = 0.0
     obstacle_boxes = [solid.bounding_box() for solid in obstacle_solids]
@@ -397,11 +447,14 @@ def _sum_pairwise_intersection_volume(moving_solids: List[object], obstacle_soli
     return total
 
 
+# 4x4 변환 행렬의 위쪽 3x4 부분으로 manifold를 옮긴다.
 def _transform_manifold(manifold, transformation_matrix: np.ndarray):
     matrix = np.asarray(transformation_matrix, dtype=float)
     return manifold.transform(matrix[:3, :4])
 
 
+# 자식 프로세스 작업: 맡은 부품 쌍의 조립 상태 간섭 길이를 계산해 큐에 넣는다.
+# 실패한 쌍은 길이 대신 오류 문자열을 담는다.
 def _baseline_pair_worker(checker, pairs, transformations, queue) -> None:
     results = list()
     for first, second in pairs:
@@ -416,11 +469,15 @@ def _baseline_pair_worker(checker, pairs, transformations, queue) -> None:
     queue.put(results)
 
 
+# 부품 쌍들을 worker_count개 프로세스로 나눠 조립 상태 간섭 길이를 병렬 계산한다.
+# 하나라도 실패하면 예외. 반환: {(부품 a, 부품 b): 간섭 길이}
 def _run_baseline_pairs_parallel(checker, pairs, transformations, worker_count: int):
     import multiprocessing
 
+    # fork로 띄워 manifold를 가진 checker를 피클링 없이 자식에게 넘긴다.
     context = multiprocessing.get_context("fork")
     count = max(1, min(worker_count, len(pairs)))
+    # 쌍을 번갈아 나눠 프로세스마다 부하를 고르게 한다.
     chunks = [pairs[index::count] for index in range(count)]
     queue = context.Queue()
     processes = list()
@@ -434,6 +491,7 @@ def _run_baseline_pairs_parallel(checker, pairs, transformations, worker_count: 
         processes.append(process)
     collected = dict()
     failures = list()
+    # 프로세스 수만큼 결과를 먼저 받은 뒤 join한다(큐를 비우기 전에 join하면 멈출 수 있다).
     for _ in processes:
         for key, value, reason in queue.get():
             if reason is not None:
@@ -450,16 +508,22 @@ def _run_baseline_pairs_parallel(checker, pairs, transformations, worker_count: 
     return collected
 
 
+# 부품 쌍별 허용 상한. baseline_lengths[a][b]는 조립 상태에서 a와 b의 간섭 길이(L0),
+# margin은 간섭 증가 허용치이며, 허용 상한 = L0 + margin이다.
 @dataclass(frozen=True)
 class InterferenceBudget:
     baseline_lengths: Dict[int, Dict[int, float]]
     margin: float
 
+    # 부품 쌍의 허용 상한. 기준값이 없으면 L0 = 0으로 본다.
     def limit_for(self, moving_solid_id: int, obstacle_solid_id: int) -> float:
         baseline = self.baseline_lengths.get(moving_solid_id, dict()).get(obstacle_solid_id, 0.0)
         return baseline + self.margin
 
 
+# 부품마다 manifold를 미리 만들어 두고, 주어진 변환에서 두 부품의 간섭 부피와 길이를 계산한다.
+# 메쉬를 만들지 못하거나 닫지 못한 부품은 excluded_solid_ids로 빼고 이유를 exclusion_reasons에
+# 남긴다.
 class InterferenceVolumeChecker:
     def __init__(
         self,
@@ -479,6 +543,7 @@ class InterferenceVolumeChecker:
         self.excluded_solid_ids: List[int] = list()
         self.exclusion_reasons: Dict[int, str] = dict()
 
+        # 부품마다 삼각분할 → manifold 복구를 하고 로컬 경계 상자를 저장한다.
         for solid_id, shape in self.solid_shapes.items():
             try:
                 vertices, faces = triangulate_solid_preserving_topology(
@@ -504,9 +569,11 @@ class InterferenceVolumeChecker:
             self.local_bounds[solid_id] = np.vstack(
                 [repaired_vertices.min(axis=0), repaired_vertices.max(axis=0)]
             )
+            # 복구를 거친 부품만 적용한 복구 라벨을 기록한다.
             if label != "직접":
                 self.recovery_settings_used[solid_id] = label
 
+        # 제외된 부품은 표에서 지우고, manifold가 하나도 없으면 예외를 발생시킨다.
         if self.excluded_solid_ids:
             for excluded_id in self.excluded_solid_ids:
                 self.solid_shapes.pop(excluded_id, None)
@@ -521,11 +588,13 @@ class InterferenceVolumeChecker:
                     )
                 )
 
+    # 부품 manifold를 변환해 리스트로 돌려준다(manifold가 없으면 None).
     def _transformed_solids(self, solid_id: int, transformation_matrix: np.ndarray):
         if solid_id in self.manifolds:
             return [_transform_manifold(self.manifolds[solid_id], transformation_matrix)]
         return None
 
+    # 로컬 경계 상자의 꼭짓점 8개를 변환해 월드 좌표 경계 상자 [[최소], [최대]]를 구한다.
     def world_bounds(self, solid_id: int, transformation_matrix: np.ndarray) -> np.ndarray:
         low, high = self.local_bounds[solid_id]
         corners = np.array(
@@ -536,6 +605,7 @@ class InterferenceVolumeChecker:
         moved = corners @ matrix[:3, :3].T + matrix[:3, 3]
         return np.vstack([moved.min(axis=0), moved.max(axis=0)])
 
+    # 두 부품을 각 변환에 놓았을 때의 겹침 부피. 경계 상자가 떨어져 있으면 불린 연산 없이 0.
     def interference_volume(
         self,
         moving_solid_id: int,
@@ -560,6 +630,7 @@ class InterferenceVolumeChecker:
             )
         return _sum_pairwise_intersection_volume(moving_solids, obstacle_solids)
 
+    # 두 부품을 각 변환에 놓았을 때의 간섭 길이 L = V^(1/3)
     def interference_length_between(
         self,
         moving_solid_id: int,
@@ -585,6 +656,9 @@ class InterferenceVolumeChecker:
         volume = _sum_pairwise_intersection_volume(moving_solids, obstacle_solids)
         return interference_length(volume)
 
+    # 조립 상태에서 모든 부품 쌍의 간섭 길이(L0)를 재서 허용 상한표를 만든다.
+    # 조립 상태에 이미 있는 겹침(접촉, 끼워맞춤)은 허용하고, 그보다 margin을 넘게 커질 때만
+    # 간섭으로 본다.
     def calibrate_baselines(
         self,
         assembled_transformations: Dict[int, np.ndarray],
@@ -599,6 +673,7 @@ class InterferenceVolumeChecker:
             for second in solid_ids[a_index + 1 :]
         ]
 
+        # worker_count가 2 이상이면 병렬로, 아니면 차례로 계산한다.
         if worker_count > 1 and len(pairs) > 1:
             computed = _run_baseline_pairs_parallel(self, pairs, assembled_transformations, worker_count)
         else:
@@ -616,6 +691,7 @@ class InterferenceVolumeChecker:
             baselines[second][first] = depth
         return InterferenceBudget(baseline_lengths=baselines, margin=float(margin))
 
+    # 허용 상한을 넘는 장애물을 (장애물 번호, 간섭 길이, 허용 상한) 목록으로 돌려준다.
     def find_interfering_obstacles(
         self,
         moving_solid_id: int,
@@ -635,6 +711,7 @@ class InterferenceVolumeChecker:
                 offenders.append((obstacle_solid_id, depth, limit))
         return offenders
 
+    # 움직이는 부품이 모든 장애물에 대해 허용 상한 이내이면 True
     def is_transformation_valid(
         self,
         moving_solid_id: int,
@@ -654,6 +731,8 @@ class InterferenceVolumeChecker:
         return True
 
 
+# 실패 진단용 겹침 정보: 장애물 번호, 간섭 길이와 허용 상한, 상한 초과 여부,
+# 겹침 부피, 겹침 메쉬(정점, 면)
 @dataclass(frozen=True)
 class OverlapRegion:
     obstacle_solid_id: int
@@ -665,6 +744,8 @@ class OverlapRegion:
     overlap_faces: np.ndarray
 
 
+# 움직이는 부품 하나와 조립 위치에 고정된 장애물들 사이의 간섭 판정 세션.
+# 장애물 manifold를 미리 변환해 두고, 판정 결과를 변환 행렬 키로 캐시한다.
 class InterferenceSession:
     def __init__(
         self,
@@ -676,6 +757,7 @@ class InterferenceSession:
         self.checker = checker
         self.moving_solid_id = moving_solid_id
         self.budget = budget
+        # 움직이는 부품 자신은 장애물에서 뺀다.
         self.obstacle_transformations = {
             solid_id: np.asarray(matrix, dtype=float)
             for solid_id, matrix in obstacle_transformations.items()
@@ -685,6 +767,7 @@ class InterferenceSession:
             raise InterferenceException(
                 "at least one obstacle besides the moving solid is required"
             )
+        # 장애물의 월드 경계 상자와 변환된 manifold를 미리 만들어 둔다.
         self.obstacle_world_bounds = {
             solid_id: checker.world_bounds(solid_id, matrix)
             for solid_id, matrix in self.obstacle_transformations.items()
@@ -694,28 +777,34 @@ class InterferenceSession:
             transformed = checker._transformed_solids(solid_id, matrix)
             if transformed is not None:
                 self.transformed_obstacles[solid_id] = transformed
+        # 판정 요청 수와 실제 불린 연산 수(통계용)
         self.query_count = 0
         self.boolean_count = 0
 
+        # 변환 행렬 키 → 판정 결과 캐시
         self.decision_cache: Dict[Tuple, bool] = dict()
         self.cache_hit_count = 0
 
+    # 캐시 키: 변환 행렬을 소수 둘째 자리로 반올림한 튜플(이 차이 안의 변환은 같은 판정을 쓴다)
     @staticmethod
     def _transformation_key(transformation_matrix: np.ndarray) -> Tuple:
         return tuple(np.round(np.asarray(transformation_matrix, dtype=float).ravel(), 2))
 
+    # 움직이는 부품을 moving_transformation에 놓았을 때 장애물 하나와의 간섭 길이
     def interference_length_against(
         self, obstacle_solid_id: int, moving_transformation: np.ndarray
     ) -> float:
         self.query_count += 1
         moving_bounds = self.checker.world_bounds(self.moving_solid_id, moving_transformation)
         obstacle_bounds = self.obstacle_world_bounds[obstacle_solid_id]
+        # 경계 상자가 떨어져 있으면 불린 연산 없이 0
         if np.any(moving_bounds[1] < obstacle_bounds[0]) or np.any(
             obstacle_bounds[1] < moving_bounds[0]
         ):
             return 0.0
 
         self.boolean_count += 1
+        # 미리 변환해 둔 장애물 manifold로 계산하고, 없으면 checker로 계산한다.
         if obstacle_solid_id in self.transformed_obstacles:
             moving_solids = self.checker._transformed_solids(
                 self.moving_solid_id, moving_transformation
@@ -733,6 +822,7 @@ class InterferenceSession:
             self.obstacle_transformations[obstacle_solid_id],
         )
 
+    # 겹치는 장애물마다 교집합 메쉬를 모아 OverlapRegion 목록을 만든다(실패 진단 저장용).
     def get_overlap_regions(self, moving_transformation: np.ndarray) -> List[OverlapRegion]:
         moving_solids = self.checker._transformed_solids(
             self.moving_solid_id, moving_transformation
@@ -755,6 +845,7 @@ class InterferenceSession:
             overlap_volume = 0.0
             vertex_blocks: List[np.ndarray] = list()
             face_blocks: List[np.ndarray] = list()
+            # 조각 여러 개를 한 메쉬로 합치도록 면의 정점 번호를 앞 조각들의 정점 수만큼 민다.
             vertex_offset = 0
             for moving_solid in moving_solids:
                 for obstacle_solid in obstacle_solids:
@@ -789,6 +880,7 @@ class InterferenceSession:
             )
         return overlap_regions
 
+    # 모든 장애물에 대해 간섭 길이가 허용 상한 이내인지 판정한다(캐시 사용).
     def is_transformation_valid(self, moving_transformation: np.ndarray) -> bool:
         cache_key = self._transformation_key(moving_transformation)
         cached = self.decision_cache.get(cache_key)
@@ -807,6 +899,8 @@ class InterferenceSession:
         self.decision_cache[cache_key] = result
         return result
 
+    # 두 변환 사이를 interpolation_count 등분한 점마다 판정한다.
+    # 위치는 선형 보간하고, 회전은 절반을 넘으면 끝 회전으로 바꾼다.
     def is_segment_valid(
         self,
         start_transformation: np.ndarray,

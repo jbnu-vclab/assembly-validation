@@ -1,16 +1,26 @@
+# conda 환경 정의. 만들기: conda env create -f environment.yml
 name: assembly-validation
 channels:
   - conda-forge
   - defaults
 dependencies:
   - python=3.12
+  # OpenCASCADE: STEP 읽기와 B-rep 삼각분할
   - pythonocc-core=7.9.3
   - pip:
+    # 배열 계산
     - numpy
+    # 진행 표시줄(현재 코드에서는 import하지 않는다)
     - tqdm
+    # 메쉬 자료형
     - trimesh
+    # 메쉬 불린 연산(간섭 부피 계산)
     - manifold3d
+    # 회전 변환과 Slerp 보간
     - scipy
+    # 결과 파일 직렬화
     - msgpack
+    # 설정 파일과 명령행 인자 처리
     - hydra-core
+    # occwl: STEP을 OCC 형상으로 읽기(Compound.load_from_step)
     - git+https://github.com/AutodeskAILab/occwl.git

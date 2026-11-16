@@ -1,20 +1,33 @@
+# main.py가 읽는 Hydra 설정. 명령행에서 key=value로 덮어쓸 수 있다
+# (예: search.iteration_count=800).
 defaults:
   - _self_
+  # Hydra 자체 로그 출력과 로그 파일을 끈다.
   - override /hydra/hydra_logging: disabled
   - override /hydra/job_logging: disabled
 
+# 날짜별 출력 폴더와 .hydra 기록 폴더를 만들지 않고 현재 폴더에서 실행한다.
 hydra:
   output_subdir: null
   run:
     dir: .
 
+# 입력 STEP 파일 경로(필수)
 step_path: ''
+# 출력 msgpack 파일 경로(필수)
 output_path: ''
+# 간섭 증가 허용치: 부품 쌍별 허용 상한 = 조립 상태 간섭 길이 + 이 값
 max_interference_growth: 2.0
 
+# 분해 탐색 설정
 search:
+  # RRT* 최대 반복 횟수(평행이동 단계와 회전 단계 각각)
   iteration_count: 400
+  # 평행이동 RRT*가 실패하면 회전까지 샘플링해 다시 탐색할지 여부
   does_sample_rotation: true
+  # 난수 시드
   random_seed: 0
+  # 부품당 시간 상한(초). 분해 루프 전체 시간이 이 값 × 부품 수를 넘으면 멈춘다.
   time_budget_seconds: 600
+  # 조립 상태 간섭 기준값을 병렬로 계산할 프로세스 수
   worker_count: 60

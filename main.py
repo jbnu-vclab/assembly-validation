@@ -1,3 +1,6 @@
+# 진입점: 조립된 STEP 파일을 읽어 부품마다 분해 경로를 찾고(직선 분해 → RRT*),
+# 결과를 msgpack으로 저장한다. 분해 순서와 경로를 뒤집으면 조립 순서와 조립 경로가 된다.
+# 실행: python main.py step_path=<입력.stp> output_path=<출력.msgpack>
 import os
 import sys
 import time
@@ -9,6 +12,7 @@ import numpy as np
 import trimesh
 from omegaconf import DictConfig
 
+# 어디서 실행해도 core/, data/를 찾도록 이 파일의 폴더를 모듈 경로 맨 앞에 넣는다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.action import Action, ActionType
@@ -32,15 +36,18 @@ from data.exporter import (
 )
 from data.loader import STEPLoader, match_solids_to_step
 
+# 터미널 표시 폭: 한글 같은 전각 문자는 2칸, 나머지는 1칸으로 센다.
 def _display_width(text: str) -> int:
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
 
 
+# 표시 폭 기준으로 공백을 채워 왼쪽(기본) 또는 오른쪽으로 정렬한다.
 def _pad(text: str, width: int, does_align_right: bool = False) -> str:
     padding = " " * max(0, width - _display_width(text))
     return padding + text if does_align_right else text + padding
 
 
+# 표시 폭을 맞춘 표를 출력한다. alignments는 열마다 '<'(왼쪽) 또는 '>'(오른쪽).
 def print_table(headers, rows, alignments=None) -> None:
     if alignments is None:
         alignments = ["<"] * len(headers)
@@ -49,6 +56,7 @@ def print_table(headers, rows, alignments=None) -> None:
               else _display_width(headers[i])
               for i in range(len(headers))]
     align_right = [alignments[i] == ">" for i in range(len(headers))]
+    # 칸마다 폭을 맞춰 한 줄로 잇는다.
     def render(cells):
         return ("  " + "  ".join(_pad(cells[i], widths[i], align_right[i])
                                  for i in range(len(headers)))).rstrip()
@@ -59,10 +67,12 @@ def print_table(headers, rows, alignments=None) -> None:
         print(render(row), flush=True)
 
 
+# '── 제목 ────' 모양의 구역 제목을 출력한다.
 def print_section(title: str) -> None:
     print(f"\n── {title} " + "─" * max(0, 74 - _display_width(title)), flush=True)
 
 
+# 저장한 msgpack을 다시 읽은 document로 파일 구조, 분해 실패 진단 표, 분해 경로 표를 출력한다.
 def print_msgpack_structure(document, output_path: str) -> None:
     metadata = document["metadata"]
     solids = document["solids"]
@@ -80,6 +90,7 @@ def print_msgpack_structure(document, output_path: str) -> None:
     for key in solids:
         result = str(solids[key].get("conversion", "—"))
         conversion_counts[result] = conversion_counts.get(result, 0) + 1
+    # 구조 요약 줄 (키 이름, 예시 값). 예시는 첫 부품, 첫 스텝, 첫 실패 부품에서 가져온다.
     lines = [
         ("metadata", ""),
         ("  step_path", str(metadata["step_path"])),
@@ -140,6 +151,8 @@ def print_msgpack_structure(document, output_path: str) -> None:
         print(("  " + _pad(label, label_width)
                + ("  " + value if value else "")).rstrip(), flush=True)
 
+    # 실패 부품 표: 경로 스텝 수, 유효 자세 유무, 막힌 자세의 겹침 수,
+    # 상한 초과 장애물(겹침 메쉬가 큰 순 2개)
     if failures:
         print_section("분해 실패 진단  (저장된 failures 재판독)")
         failure_rows = []
@@ -180,6 +193,7 @@ def print_msgpack_structure(document, output_path: str) -> None:
     if not trajectories:
         return
 
+    # 궤적 스텝을 연속된 같은 부품끼리 묶어 부품별 구간(분해 순서)으로 만든다.
     segments = []
     for key in sorted(trajectories):
         entry = trajectories[key]
@@ -193,6 +207,7 @@ def print_msgpack_structure(document, output_path: str) -> None:
 
     print_section("분해 경로  (역순이 조립 경로)")
     rows = []
+    # 구간마다 주 이동 축·부호(가장 크게 움직인 축), 이동 거리, 회전 수, 최종 자세
     for order, segment in enumerate(segments, 1):
         solid_id = int(segment["solid"])
         steps = segment["steps"]
@@ -220,6 +235,8 @@ def print_msgpack_structure(document, output_path: str) -> None:
           f" 각 동작의 값을 반대로 적용해 얻는다.", flush=True)
 
 
+# 상태·동작 목록을 저장용 궤적 스텝 (부품 번호, 동작 후 상태, 동작)으로 바꾼다.
+# 평행이동은 이동 단위 최대 길이 이하의 같은 조각으로 나누고, 회전은 한 스텝으로 둔다.
 def to_waypoint_steps(moving_solid_id, states, actions):
     if len(actions) != len(states) - 1:
         raise RuntimeError(
@@ -238,6 +255,7 @@ def to_waypoint_steps(moving_solid_id, states, actions):
         position = np.asarray(previous_state.position, dtype=float)
         for piece_index in range(piece_count):
             position = position + piece
+            # 마지막 조각은 누적 오차 없이 목표 위치에 정확히 맞춘다.
             if piece_index == piece_count - 1:
                 position = np.asarray(state.position, dtype=float)
             waypoint_steps.append((
@@ -248,6 +266,9 @@ def to_waypoint_steps(moving_solid_id, states, actions):
     return waypoint_steps
 
 
+# 어느 단계에서 분해되었는지 나타내는 라벨.
+# Tier2 = RRT*(회전 단계까지 갔으면 '회전', 아니면 '병진'),
+# Tier1 = 직선 분해(첫 이동 축이 전체 주 이동 축과 다르면 '옆+직선')
 def to_resolution_tier(result):
     if result.rotation_iteration_count > 0:
         return f"Tier2 회전 RRT* {result.rotation_iteration_count}회"
@@ -263,11 +284,20 @@ def to_resolution_tier(result):
     return "Tier1 직선"
 
 
+# 경로 연장 거리: 분해 경로를 주 이동 축으로 늘려 조립 위치에서 이 거리만큼 떨어지게 한다.
+# 마지막 부품은 +x로 이 거리만큼 뺀다.
 ESCAPE_DISTANCE = 400.0
 
+# 이동 단위 최대 길이: 저장 궤적에서 평행이동 한 스텝의 최대 길이(웨이포인트 간격)
 TRAJECTORY_WAYPOINT_STEP = 50.0
 
 
+# 분해 탐색 전체 과정
+#   1) STEP → 몸체별 메쉬 → manifold 복구 → B-rep 대응
+#   2) 간섭 판정기 구성과 조립 상태 간섭 기준값 측정
+#   3) 그리디 분해 루프: 작은 부품부터 직선 분해를 시도하고, 없으면 RRT*
+#   4) 분해하지 못한 부품의 실패 진단
+#   5) msgpack 저장과 결과 출력
 def execute_disassembly_search(
     step_path: str,
     output_path: str,
@@ -279,20 +309,26 @@ def execute_disassembly_search(
     max_interference_growth: float,
 ):
     search_started = time.time()
+    # 출력 폴더가 없으면 만든다.
     output_directory = os.path.dirname(os.path.abspath(output_path))
     if output_directory:
         os.makedirs(output_directory, exist_ok=True)
 
+    # 탐색 시작부터 지난 시간
     def elapsed() -> str:
         return f"{time.time() - search_started:6.1f}s"
 
     print_section(f"입력  {os.path.basename(step_path)}")
 
+    # 1) STEP을 몸체별 메쉬로 읽는다(삼각분할 선형 허용 오차 0.02, 각도 허용 오차 0.5, 스레드 8개).
     loader = STEPLoader(step_path, face_tolerance=0.02, angle_tolerance=0.5, max_workers=8)
+    # 판정에 쓰는 부품 정보(부품 번호 → 값)
     meshes, signatures, seen_signatures, repair_labels, names = {}, {}, set(), {}, {}
     name_sources, hash_named_ids = {}, []
+    # 닫힌 메쉬로 만들지 못해 판정에서 빼고 화면 표시용으로만 저장할 몸체
     display_meshes, display_names, display_signatures, display_reasons = {}, {}, {}, {}
     excluded_bodies = []
+    # 같은 서명(같은 형상·위치)의 몸체는 하나만 쓰고, 닫힌 manifold로 복구한다.
     for mesh in loader.load_all():
         signature = STEPLoader.mesh_signature(mesh.vertices)
         if signature in seen_signatures:
@@ -303,6 +339,7 @@ def execute_disassembly_search(
             np.asarray(mesh.faces, dtype=np.int64),
             1e-9,
         )
+        # 복구하지 못한 몸체는 판정에서 빼고 표시용으로만 남긴다.
         if manifold is None:
             display_id = len(display_meshes)
             display_meshes[display_id] = trimesh.Trimesh(
@@ -314,6 +351,7 @@ def execute_disassembly_search(
             display_signatures[display_id] = signature
             display_reasons[display_id] = f"복구 후에도 닫히지 않음: {repair_label}"
             continue
+        # 복구한 몸체는 들어온 순서대로 부품 번호를 매기고 복구된 메쉬를 쓴다.
         solid_id = len(meshes)
         meshes[solid_id] = trimesh.Trimesh(
             vertices=repaired_vertices, faces=repaired_faces, process=False
@@ -325,6 +363,7 @@ def execute_disassembly_search(
             hash_named_ids.append(solid_id)
         if repair_label != "직접":
             repair_labels[solid_id] = repair_label
+    # 삼각분할조차 실패한 몸체는 제외 목록에 넣는다.
     for skipped_name, skipped_reason in getattr(loader, "skipped_bodies", []):
         excluded_bodies.append(("", str(skipped_name), str(skipped_reason)))
 
@@ -336,15 +375,20 @@ def execute_disassembly_search(
         )
     step_named_ids = [i for i in solid_ids if i not in hash_named_ids]
 
+    # 부품별 경계 상자 크기와 정점 배열
     extents = {i: np.asarray(meshes[i].bounds[1]) - np.asarray(meshes[i].bounds[0])
                for i in solid_ids}
     vertex_arrays = {i: np.asarray(meshes[i].vertices, float) for i in solid_ids}
+    # 각 메쉬와 짝지은 B-rep 형상(간섭 판정기는 이 형상에서 메쉬를 다시 만든다). 짝 오차 상한 2.0
     shapes = match_solids_to_step(vertex_arrays, step_path, maximum_error=2.0)
     identity = np.eye(4)
+    # 메쉬가 이미 조립 위치의 월드 좌표라서 조립 상태는 모두 원점·무회전이다.
     assembled_states = {i: State((0.0, 0.0, 0.0), (0, 0, 0)) for i in solid_ids}
 
+    # 델타(탐색 스텝) = 가장 얇은 부품 두께(경계 상자의 가장 짧은 변)의 절반
     smallest_extent = min(float(np.min(extents[i])) for i in solid_ids)
     spacing = smallest_extent / 2.0
+    # 조립체 span = 전체 경계 상자의 가장 긴 변
     global_low = np.min([np.asarray(meshes[i].bounds[0]) for i in solid_ids], axis=0)
     global_high = np.max([np.asarray(meshes[i].bounds[1]) for i in solid_ids], axis=0)
     assembly_span = float(np.max(global_high - global_low))
@@ -364,6 +408,7 @@ def execute_disassembly_search(
               + ", ".join(f"{name}({reason[:36]})" for _, name, reason in excluded_bodies),
               flush=True)
 
+    # 부품 표(경계 상자 부피가 큰 순)
     print_section("부품")
     print_table(
         ["서명", "이름", "부피", "AABB (x·y·z)"],
@@ -374,6 +419,7 @@ def execute_disassembly_search(
         ["<", "<", ">", "<"],
     )
 
+    # 2) B-rep 형상으로 간섭 판정기를 만든다. 판정기에서 빠진 부품은 모든 표에서 지운다.
     preparation_started = time.time()
     checker = InterferenceVolumeChecker(shapes)
     for excluded_id in getattr(checker, "excluded_solid_ids", []):
@@ -394,9 +440,11 @@ def execute_disassembly_search(
         print(f"  판정기 추가 제외 {len(checker.excluded_solid_ids)}개 "
               f"-> 남은 부품 {len(solid_ids)}개", flush=True)
 
+    # 조립 상태의 쌍별 간섭 길이(L0)를 재서 허용 상한(L0 + 간섭 증가 허용치)을 정한다.
     budget = checker.calibrate_baselines({i: identity for i in solid_ids},
                                          margin=float(max_interference_growth),
                                          worker_count=worker_count)
+    # 이 길이 이하의 조립 간섭은 출력 통계에서 세지 않는다.
     CONTACT_REPORT_THRESHOLD = 1e-3
     contact_pairs = {
         frozenset((first, second)): length
@@ -420,6 +468,9 @@ def execute_disassembly_search(
     print(f"  manifold {len(checker.manifolds)}/{len(solid_ids)}  ·  준비 "
           f"{time.time() - preparation_started:.1f}s  ·  {elapsed()}", flush=True)
 
+    # RRT* 설정(델타 = spacing): 이웃 반경 3×델타, 회전 비용과 목표 여유는 델타,
+    # 목표 편향 비율 30%, 보간 점 8개, 샘플링 범위는 조립체를 사방으로 그 크기만큼 넓힌 범위,
+    # 연속 확장 한계 = 조립체 span × 2 / 델타 + 2, 첫 분해 경로를 찾으면 멈춘다.
     config = RRTStarConfig(
         max_iteration_count=iteration_count,
         translation_step_size=spacing,
@@ -449,6 +500,8 @@ def execute_disassembly_search(
         ["<", ">", "<"],
     )
 
+    # 찾은 분해 경로를 주 이동 축 방향으로 늘려, 그 축의 총 이동량을 경로 연장 거리로 맞춘다.
+    # 이미 그 이상 움직였거나 늘린 구간이 간섭하면 원래 결과를 돌려준다.
     def extend_to_escape(planner, result):
         final_state = result.states[-1]
         start_position = np.asarray(planner.start_state.position, dtype=float)
@@ -485,6 +538,7 @@ def execute_disassembly_search(
             farthest_paths=tuple(),
         )
 
+    # 남은 부품 중 움직이는 부품을 뺀 나머지를 조립 위치에 고정한 간섭 판정 세션
     def build_interference_session(moving_solid_id, present_ids):
         obstacle_ids = [i for i in present_ids if i != moving_solid_id]
         if not obstacle_ids:
@@ -496,6 +550,7 @@ def execute_disassembly_search(
             checker, moving_solid_id, {i: identity for i in obstacle_ids}, budget
         )
 
+    # 남은 부품만으로 플래너를 만든다.
     def build_planner(moving_solid_id, present_ids, session):
         return RRTStarPlanner(
             moving_solid_id=moving_solid_id,
@@ -505,6 +560,7 @@ def execute_disassembly_search(
             interference_session=session,
         )
 
+    # 조립 상태에서 움직이는 부품과 나머지 부품 전체 경계 상자 사이의 최대 분리량
     def get_assembled_separation(moving_solid_id, present_ids):
         obstacle_ids = [i for i in present_ids if i != moving_solid_id]
         obstacle_bounding_box = np.vstack([
@@ -519,6 +575,7 @@ def execute_disassembly_search(
         )
         return get_axis_aligned_separation(world_vertices, obstacle_bounding_box)[2]
 
+    # 직선 분해만 시도한다. 첫 동작이 불가능하거나 직선으로 빠지지 않으면 None.
     def plan_straight_removal(moving_solid_id, present_ids):
         session = build_interference_session(moving_solid_id, present_ids)
         planner = build_planner(moving_solid_id, present_ids, session)
@@ -529,6 +586,7 @@ def execute_disassembly_search(
             return None
         return extend_to_escape(planner, result)
 
+    # RRT*로 분해를 시도하고, 성공하면 경로를 늘린다.
     def plan_tree_removal(moving_solid_id, present_ids):
         session = build_interference_session(moving_solid_id, present_ids)
         planner = build_planner(moving_solid_id, present_ids, session)
@@ -538,9 +596,11 @@ def execute_disassembly_search(
         return extend_to_escape(planner, result)
 
     print_section("분해 탐색")
+    # 분해 탐색 진행 표의 열 이름, 정렬, 폭
     search_header = ["#", "부품", "이름", "계층", "스텝", "비용", "남은", "누적"]
     search_alignments = [">", "<", "<", "<", ">", ">", ">", ">"]
     search_widths = [3, 6, 16, 20, 4, 7, 4, 6]
+    # 진행 표 한 줄을 고정 폭으로 출력한다.
     def print_search_row(cells) -> None:
         print(("  " + "  ".join(_pad(cells[i], search_widths[i],
                                      search_alignments[i] == ">")
@@ -549,12 +609,14 @@ def execute_disassembly_search(
     print_search_row(search_header)
     print_search_row(["─" * width for width in search_widths])
 
+    # 3) 그리디 분해 루프: 라운드마다 분해되는 부품 하나를 골라 빼고, 남은 부품으로 반복한다.
     search_loop_started = time.time()
     active_ids = list(solid_ids)
     removal_results = []
     resolved_tiers = {}
     failed_attempts = {}
     while active_ids:
+        # 마지막 부품은 장애물이 없으므로 +x로 경로 연장 거리만큼 빼는 경로를 바로 만든다.
         if len(active_ids) == 1:
             last_id = active_ids[0]
             escape_position = np.zeros(3)
@@ -579,6 +641,7 @@ def execute_disassembly_search(
 
         picked = None
         is_over_time_budget = False
+        # 경계 상자 부피가 작은 부품부터 직선 분해를 시도해, 처음 성공한 부품을 고른다.
         ordered_ids = sorted(active_ids, key=lambda i: float(np.prod(extents[i])))
         for moving_solid_id in ordered_ids:
             try:
@@ -589,10 +652,13 @@ def execute_disassembly_search(
             if result is not None:
                 picked = (moving_solid_id, result)
                 break
+            # 분해 루프 전체 시간이 (부품당 시간 상한 × 부품 수)를 넘으면 이번 라운드를 멈춘다.
             if time.time() - search_loop_started > time_budget_seconds * len(solid_ids):
                 is_over_time_budget = True
                 print("    ! 시간 상한 도달 — 이 라운드에서 중단", flush=True)
                 break
+        # 직선으로 빠지는 부품이 없으면 같은 순서로 RRT*를 시도한다.
+        # 실패 결과는 실패 진단에서 다시 쓰려고 장애물 집합과 함께 보관한다.
         if picked is None and not is_over_time_budget:
             print(f"    · 직선으로 빠지는 부품 없음 — 남은 {len(ordered_ids)}개에 RRT* 탐색",
                   flush=True)
@@ -612,9 +678,11 @@ def execute_disassembly_search(
                 if time.time() - search_loop_started > time_budget_seconds * len(solid_ids):
                     print("    ! 시간 상한 도달 — 이 라운드에서 중단", flush=True)
                     break
+        # 이번 라운드에 분해된 부품이 없으면 루프를 끝낸다(남은 부품은 분해 실패).
         if picked is None:
             break
 
+        # 고른 부품을 빼고 결과와 해결 단계를 기록한 뒤 진행 표에 한 줄 출력한다.
         moving_solid_id, result = picked
         removal_results.append((moving_solid_id, result))
         active_ids.remove(moving_solid_id)
@@ -631,6 +699,8 @@ def execute_disassembly_search(
              if active_ids else "")
           + f"  ·  탐색 {time.time() - search_loop_started:.0f}s", flush=True)
 
+    # 4) 실패 진단: 실패한 부품끼리만 장애물로 두고, 부품마다 가장 가까이 간 경로,
+    # 간섭 없는 마지막 자세, 거기서 더 밀었을 때 처음 막힌 자세와 겹침 메쉬를 구한다.
     failure_diagnoses = {}
     if search_failure_ids:
         print_section("실패 진단")
@@ -644,6 +714,8 @@ def execute_disassembly_search(
             try:
                 planner = build_planner(moving_solid_id, search_failure_ids, session)
             except PlanningException as error:
+                # 조립 상태부터 허용 상한을 넘어 플래너를 만들 수 없으면
+                # 조립 자세의 겹침만 기록한다.
                 failure_diagnoses[moving_solid_id] = SolidFailureDiagnosis(
                     reason=("조립 상태부터 이미 간섭 상한을 넘어 탐색을 시작할 수 없다 "
                             f"({error}). 허용 증가값이 이 부품의 조립 상태 맞물림보다 "
@@ -681,13 +753,18 @@ def execute_disassembly_search(
                 ])
                 continue
 
+            # 같은 장애물 집합으로 실패한 RRT* 결과가 있으면 다시 쓰고,
+            # 없으면 전체 탐색(직선 분해 포함)을 다시 한다.
             cached_attempt = failed_attempts.get(moving_solid_id)
             if cached_attempt is not None and cached_attempt[0] == obstacle_ids:
                 result = cached_attempt[1]
             else:
                 result = planner.execute_search()
 
+            # 가장 가까운 경로: 성공이면 그 경로, 실패면 가장 열린 방향으로 가장 멀리 간 경로
             closest_states, closest_actions, closest_separation = planner.get_closest_path(result)
+            # 실패 이유: 다시 해 보니 성공(시간 상한 탓) / 첫 동작부터 불가능 /
+            # 반복 안에 목표 여유 미도달
             if result.is_success:
                 reason = ("마지막 라운드에서 시도되지 않았다(시간 상한). 실패가 확정된 "
                           "장애물 집합으로 다시 탐색하니 경로가 있었으므로, 기하학적으로 "
@@ -702,6 +779,8 @@ def execute_disassembly_search(
                 reason = (f"RRT* {stage_summary} 반복 안에 추출 상태에 닿지 "
                           "못했다. 반복 수·시간 상한·회전 허용 여부를 바꾸면 달라질 수 있다.")
 
+            # 경로 끝을 마지막 유효 자세로 두고,
+            # 거기서 가장 열린 방향으로 밀어 처음 막힌 자세를 찾는다.
             last_valid_state = closest_states[-1]
             last_valid_pose = DiagnosedPose(
                 state=last_valid_state,
@@ -733,12 +812,14 @@ def execute_disassembly_search(
                 first_blocked_pose=first_blocked_pose,
             )
 
+            # 표에 보일 상한 초과 장애물: 막힌 자세(없으면 마지막 유효 자세)의 겹침 중 부피가 큰 순
             blocking_pose = (last_valid_pose if first_blocked_pose is None
                              else first_blocked_pose)
             blocking_regions = sorted(
                 (region for region in blocking_pose.overlap_regions if region.is_over_limit),
                 key=lambda region: -region.overlap_volume,
             )
+            # 방향 열: 가장 열린 방향과 열린 정도(다시 해 보니 성공했으면 '—')
             if result.is_success:
                 direction_label = "—"
             else:
@@ -769,6 +850,7 @@ def execute_disassembly_search(
         print("  방향 = 조립 상태에서 부품 투영이 가장 넓게 트인 축·부호(개방도). 경로와 막힘"
               " 자세를 이 방향으로 잡고, 분리량도 이 방향의 값이다.", flush=True)
 
+    # 5) 분해된 부품의 경로를 분해 순서대로 이어 저장용 궤적을 만든다.
     trajectory_steps = []
     for moving_solid_id, result in removal_results:
         trajectory_steps.extend(
@@ -777,6 +859,8 @@ def execute_disassembly_search(
     rotation_step_count = sum(1 for _, _, action in trajectory_steps
                               if action.action_type != ActionType.TRANSLATION)
 
+    # 부품별 요약(상태, 분해 순서, 경로, 해결 단계, 실패 이유).
+    # 결과 표 출력에만 쓰고 파일에는 넣지 않는다.
     removal_orders = {solid_id: index + 1
                       for index, (solid_id, _) in enumerate(removal_results)}
     results_by_id = dict(removal_results)
@@ -816,6 +900,7 @@ def execute_disassembly_search(
             })
         parts_metadata[int(solid_id)] = entry
 
+    # 파일 metadata: 제외 몸체 목록(아래에서 닫히지 않은 몸체 목록도 더한다)
     metadata = {
         "excluded_bodies": [
             {"signature": signature, "name": name, "reason": reason}
@@ -823,6 +908,8 @@ def execute_disassembly_search(
         ],
     }
 
+    # 닫히지 않아 판정에서 뺀 몸체도 화면 표시용으로 파일에 넣는다
+    # (conversion '실패', 조립 상태는 원점).
     export_meshes = dict(meshes)
     export_names = dict(names)
     conversions = {int(solid_id): "성공" for solid_id in solid_ids}
@@ -846,6 +933,7 @@ def execute_disassembly_search(
         for display_id in sorted(display_meshes)
     ]
 
+    # msgpack으로 저장하고, 다시 읽어 구조 출력에 쓴다.
     serializer = MsgpackTrajectorySerializer(step_path, export_meshes, assembled_states,
                                              extra_metadata=metadata,
                                              solid_names=export_names,
@@ -854,6 +942,7 @@ def execute_disassembly_search(
     serializer.write_to_file(trajectory_steps, output_path)
     read_back = MsgpackTrajectorySerializer.read_from_file(output_path)
 
+    # 결과 표: 분해 순서대로, 분해하지 못한 부품은 뒤에
     print_section("결과")
     print_table(
         ["서명", "이름", "상태", "순서", "스텝", "해소"],
@@ -866,6 +955,7 @@ def execute_disassembly_search(
         ["<", "<", "<", ">", ">", "<"],
     )
 
+    # 요약 출력
     seconds = time.time() - search_started
     print_section("요약")
     print(f"  분해        {len(removal_results)}/{len(solid_ids)} 부품"
@@ -881,6 +971,7 @@ def execute_disassembly_search(
 
     print_msgpack_structure(read_back, output_path)
     print("", flush=True)
+    # 호출한 쪽(main)에 돌려주는 요약 값
     return {
         "removable": len(removal_results),
         "total": len(solid_ids),
@@ -890,8 +981,11 @@ def execute_disassembly_search(
     }
 
 
+# Hydra 진입점: config/config.yaml 값을 명령행 인자(step_path=..., output_path=...)로
+# 덮어써 탐색을 실행한다.
 @hydra.main(config_path="config", config_name="config", version_base=None)
 def main(config: DictConfig):
+    # 필수 인자와 입력 파일을 확인한다.
     usage = ("예: python main.py step_path=/path/to/assembly.stp "
              "output_path=/path/to/result.msgpack")
     if not config.step_path:

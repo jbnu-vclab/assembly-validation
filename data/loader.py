@@ -1,3 +1,6 @@
+# STEP 파일을 읽어 몸체마다 삼각형 메쉬와 이름을 만든다.
+# 이름은 STEP 텍스트의 PRODUCT 구조를 직접 파싱해 붙이고, 없으면 OCC가 읽은 이름,
+# 그래도 없으면 메쉬 해시(서명)를 쓴다.
 import contextlib
 import hashlib
 import io
@@ -21,6 +24,7 @@ from OCC.Core.TopoDS import topods
 from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 
 
+# 괄호 밖이면서 따옴표 밖에 있는 separator에서만 문자열을 나눈다('' 이스케이프 처리 포함).
 def _split_top_level(text: str, separator: str) -> List[str]:
     pieces, depth, quoted, start, index = list(), 0, False, 0, 0
     while index < len(text):
@@ -45,10 +49,12 @@ def _split_top_level(text: str, separator: str) -> List[str]:
     return pieces
 
 
+# STEP의 DATA 구역을 파싱해 {엔티티 번호: (타입 이름, 인자 문자열)}을 만든다.
 def _parse_step_entities(path: str):
     with open(path, "r", errors="replace") as handle:
         text = handle.read()
     upper = text.upper()
+    # DATA;부터 마지막 ENDSEC; 사이 본문에서 /* */ 주석을 지운다.
     body = re.sub(r"/\*.*?\*/", "",
                   text[upper.index("DATA;") + 5: upper.rindex("ENDSEC;")], flags=re.S)
     entities = dict()
@@ -60,6 +66,7 @@ def _parse_step_entities(path: str):
         if head is None:
             continue
         rest = statement[head.end():].strip()
+        # 타입 이름 없이 괄호로 시작하는 복합 엔티티는 '__COMPLEX__'로 둔다.
         named = re.match(r"([A-Za-z0-9_]+)\s*\(", rest)
         if named is None:
             entities[int(head.group(1))] = ("__COMPLEX__", rest)
@@ -71,38 +78,50 @@ def _parse_step_entities(path: str):
     return entities
 
 
+# 인자 문자열 안의 엔티티 참조(#번호)를 정수 목록으로 뽑는다.
 def _entity_references(argument_text: str) -> List[int]:
     return [int(value) for value in re.findall(r"#(\d+)", argument_text)]
 
 
+# 인자 문자열 안의 작은따옴표 문자열들을 뽑는다('' → ').
 def _entity_strings(argument_text: str) -> List[str]:
     return [match.group(1).replace("''", "'")
             for match in re.finditer(r"'((?:[^']|'')*)'", argument_text)]
 
 
+# 솔리드 형상으로 보는 STEP 엔티티 타입
 _SOLID_ENTITY_TYPES = frozenset({
     "MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS", "FACETED_BREP",
     "SHELL_BASED_SURFACE_MODEL",
 })
 
 
+# STEP 텍스트에서 솔리드마다 (PRODUCT 이름, 조립체 안 등장 횟수, 고유 정점 수)를 구한다.
+# PRODUCT_DEFINITION_SHAPE에서 출발해 PRODUCT_DEFINITION → FORMATION → PRODUCT로 이름을,
+# SHAPE_DEFINITION_REPRESENTATION → 형상 표현으로 솔리드를 찾는다.
+# 반환: 이름이 있는 것만 [{name, occurrences, vertices}, ...]
 def product_names_from_step(path: str):
     entities = _parse_step_entities(path)
+    # 타입 이름 → 엔티티 번호 목록
     by_type = dict()
     for identifier, (kind, _) in entities.items():
         by_type.setdefault(kind, list()).append(identifier)
 
+    # 여러 타입의 엔티티 번호를 한 목록으로 모은다.
     def of_type(*kinds):
         result = list()
         for kind in kinds:
             result.extend(by_type.get(kind, ()))
         return result
 
+    # PRODUCT 번호 → 이름(비어 있지 않은 첫 문자열)
     product_name = dict()
     for identifier in of_type("PRODUCT"):
         values = [value for value in _entity_strings(entities[identifier][1]) if value.strip()]
         product_name[identifier] = values[0] if values else None
 
+    # 참조를 따라갈 표: FORMATION → PRODUCT, DEFINITION → FORMATION,
+    # DEFINITION_SHAPE → DEFINITION, DEFINITION_SHAPE → 형상 표현들
     product_of_formation = dict()
     for identifier in of_type("PRODUCT_DEFINITION_FORMATION",
                               "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE"):
@@ -129,6 +148,8 @@ def product_names_from_step(path: str):
         if len(linked) >= 2:
             representation_of_shape.setdefault(linked[0], list()).append(linked[1])
 
+    # 조립 배치용 관계(CONTEXT_DEPENDENT_SHAPE_REPRESENTATION)가 가리키는 관계는 빼고,
+    # 나머지 표현 사이 관계를 양방향 연결로 저장한다.
     assembly_relations = set()
     for identifier in of_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"):
         assembly_relations.update(_entity_references(entities[identifier][1]))
@@ -142,6 +163,7 @@ def product_names_from_step(path: str):
             geometry_links.setdefault(linked[0], set()).add(linked[1])
             geometry_links.setdefault(linked[1], set()).add(linked[0])
 
+    # 표현과 거기 연결된 표현들을 따라가며 솔리드 엔티티 번호를 모은다(방문한 표현은 건너뛴다).
     def solids_in(representation_id, visited=None):
         if visited is None:
             visited = set()
@@ -159,6 +181,7 @@ def product_names_from_step(path: str):
             found.extend(solids_in(neighbour, visited))
         return found
 
+    # PRODUCT별 솔리드 엔티티 목록
     solids_of_product, product_of_definition = dict(), dict()
     for shape_id, definition_id in definition_of_shape.items():
         formation = formation_of_definition.get(definition_id)
@@ -169,6 +192,8 @@ def product_names_from_step(path: str):
         for representation in representation_of_shape.get(shape_id, ()):
             solids_of_product.setdefault(product, list()).extend(solids_in(representation))
 
+    # NEXT_ASSEMBLY_USAGE_OCCURRENCE로 부모 → 자식 정의 관계를 만들고,
+    # 부모가 없는 정의를 루트로 둔다.
     children, child_definitions = dict(), set()
     for identifier in of_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE"):
         linked = [value for value in _entity_references(entities[identifier][1])
@@ -178,8 +203,10 @@ def product_names_from_step(path: str):
             child_definitions.add(linked[1])
     roots = [value for value in definition_ids if value not in child_definitions]
 
+    # PRODUCT별 조립체 안 등장 횟수
     occurrences = dict()
 
+    # 루트에서 조립 트리를 내려가며 등장 횟수를 센다(seen으로 순환을 막는다).
     def walk(definition_id, seen):
         product = product_of_definition.get(definition_id)
         if product is None:
@@ -193,6 +220,8 @@ def product_names_from_step(path: str):
     for root in roots:
         walk(root, frozenset())
 
+    # 솔리드 엔티티 아래의 VERTEX_POINT 좌표를 모아 고유 정점 수를 센다
+    # (몸체와 이름을 맞출 때 쓰는 특징).
     def vertex_count(solid_id):
         seen, stack, points = set(), [solid_id], set()
         while stack:
@@ -218,6 +247,7 @@ def product_names_from_step(path: str):
             stack.extend(_entity_references(arguments))
         return len(points)
 
+    # 솔리드마다 (이름, 등장 횟수, 정점 수)
     parts = list()
     for product, solids in solids_of_product.items():
         for solid in solids:
@@ -227,6 +257,8 @@ def product_names_from_step(path: str):
     return [part for part in parts if part["name"]]
 
 
+# 형상 안의 몸체를 모은다: 모든 SOLID(True)와 어느 SOLID에도 속하지 않는 SHELL(False).
+# 반환: [(몸체, 솔리드 여부), ...]
 def enumerate_bodies(shape) -> List[Tuple[object, bool]]:
     bodies: List[Tuple[object, bool]] = list()
     explorer = TopExp_Explorer(shape, TopAbs_SOLID)
@@ -242,16 +274,19 @@ def enumerate_bodies(shape) -> List[Tuple[object, bool]]:
     return bodies
 
 
+# 메쉬와 STEP 몸체를 짝짓지 못했을 때 발생시키는 예외
 class StepMatchingException(Exception):
     pass
 
 
+# 점들의 경계 상자 중심(3)과 크기(3)를 이은 6차원 특징
 def _bounding_key(points: np.ndarray) -> np.ndarray:
     lower = points.min(axis=0)
     upper = points.max(axis=0)
     return np.concatenate([(lower + upper) / 2.0, upper - lower])
 
 
+# 형상을 삼각분할해 모든 노드 좌표를 모은다(짝짓기 특징 계산용).
 def _triangulated_points(shape) -> np.ndarray:
     breptools.Clean(shape)
     BRepMesh_IncrementalMesh(shape, 0.02, False, 0.5, True)
@@ -270,6 +305,8 @@ def _triangulated_points(shape) -> np.ndarray:
     return np.asarray(collected, dtype=float)
 
 
+# 메쉬 부품마다 STEP의 B-rep 몸체를 하나씩 짝짓는다. 반환: {부품 번호: B-rep 형상}
+# 가장 나쁜 짝의 거리가 maximum_error를 넘으면 예외를 발생시킨다.
 def match_solids_to_step(
     solid_vertices: Dict[int, np.ndarray], step_path: str, maximum_error: float
 ) -> Dict[int, object]:
@@ -287,12 +324,14 @@ def match_solids_to_step(
         points = _triangulated_points(shape)
         shape_keys.append(_bounding_key(points) if len(points) else np.full(6, np.inf))
 
+    # 부품 × 몸체 거리: 경계 상자 특징 차이의 최대 성분
     distances = np.array(
         [
             [float(np.abs(mesh_keys[i] - shape_keys[s]).max()) for s in range(len(shapes))]
             for i in solid_ids
         ]
     )
+    # 거리가 작은 (부품, 몸체) 쌍부터 겹치지 않게 짝짓는다.
     candidates = sorted(
         (distances[row][shape_index], row, shape_index)
         for row in range(len(solid_ids))
@@ -321,15 +360,19 @@ def match_solids_to_step(
     return matched
 
 
+# STEP 파일을 읽어 몸체마다 trimesh 메쉬와 이름을 만든다. face_tolerance와
+# angle_tolerance는 OCC 삼각분할의 선형·각도 허용 오차, max_workers는 메쉬 변환 스레드 수다.
 class STEPLoader:
     def __init__(self, filename: str, face_tolerance: float, angle_tolerance: float, max_workers: int):
         self.filename = filename
         self.face_tolerance = face_tolerance
         self.angle_tolerance = angle_tolerance
         self.max_workers = max_workers
+        # 메쉬를 얻지 못한 몸체의 (이름, 이유)와 몸체별 이름 출처
         self.skipped_bodies: List[Tuple[str, str]] = list()
         self.name_sources: List = list()
 
+    # 몸체 하나를 삼각분할해 trimesh 메쉬로 바꾼다. 삼각형이 하나도 없으면 None.
     def load(self, body):
         breptools.Clean(body)
         BRepMesh_IncrementalMesh(
@@ -344,10 +387,12 @@ class STEPLoader:
             triangulation = BRep_Tool.Triangulation(face, location)
             if triangulation is not None:
                 transformation = location.Transformation()
+                # 방향이 뒤집힌 면은 꼭짓점 순서를 바꿔 법선이 바깥을 향하게 한다.
                 is_reversed = face.Orientation() == TopAbs_REVERSED
                 local_indices = list()
                 for node_number in range(1, triangulation.NbNodes() + 1):
                     point = triangulation.Node(node_number).Transformed(transformation)
+                    # 소수 여섯째 자리까지 같은 좌표의 정점은 하나로 합친다.
                     coordinate = (round(point.X(), 6), round(point.Y(), 6), round(point.Z(), 6))
                     global_index = index_of_coordinate.get(coordinate)
                     if global_index is None:
@@ -373,12 +418,16 @@ class STEPLoader:
             process=False,
         )
 
+    # 정점 좌표(소수 셋째 자리)를 정렬해 만든 md5의 앞 6자리.
+    # 부품 서명, 중복 몸체 판별, 이름 대용으로 쓴다.
     @staticmethod
     def mesh_signature(vertices):
         array = np.round(np.asarray(vertices, dtype=float), 3)
         ordered = array[np.lexsort(array.T)]
         return hashlib.md5(ordered.tobytes()).hexdigest()[:6]
 
+    # B-rep 형상 서명: (고유 정점 수, 경계 상자, 정렬한 정점 좌표의 md5).
+    # OCC 이름표와 몸체를 맞출 때 쓴다.
     @staticmethod
     def _shape_signature(shape):
         points = list()
@@ -402,10 +451,13 @@ class STEPLoader:
             hashlib.md5(ordered.tobytes()).hexdigest(),
         )
 
+    # OCC의 read_step_file_with_names_colors로 형상별 이름을 읽어 {형상 서명: [이름, ...]}을
+    # 만든다. 읽기에 실패하면 빈 사전을 돌려준다.
     def names_by_signature(self):
         try:
             from OCC.Extend.DataExchange import read_step_file_with_names_colors
 
+            # OCC 함수가 찍는 표준 출력은 버린다.
             with io.StringIO() as sink, contextlib.redirect_stdout(sink):
                 table = read_step_file_with_names_colors(self.filename)
         except Exception:
@@ -422,6 +474,9 @@ class STEPLoader:
             names.setdefault(signature, list()).append(str(name))
         return names
 
+    # 같은 몸체가 부피가 음수인(안팎이 뒤집힌) 표현으로 한 번 더 들어 있으면 음수 쪽을 뺀다.
+    # 경계 상자 차이가 대각선의 relative_tolerance 이내이고 |부피| 차이가 5% 이내인
+    # 양수 몸체를 짝으로 본다(양수 몸체 하나는 한 번만 짝짓는다).
     @staticmethod
     def _without_duplicate_representations(bodies, relative_tolerance: float = 0.01):
         from OCC.Core.Bnd import Bnd_Box
@@ -461,6 +516,7 @@ class STEPLoader:
             return bodies
         return [body for index, body in enumerate(bodies) if index not in dropped]
 
+    # 이동·회전해도 변하지 않는 서명: (고유 정점 수, |부피|, 겉넓이). 같은 부품의 사본을 묶는다.
     @staticmethod
     def _rigid_signature(shape):
         from OCC.Core.BRepGProp import brepgprop
@@ -482,6 +538,9 @@ class STEPLoader:
         return (points, round(abs(volume_properties.Mass()), 2),
                 round(surface_properties.Mass(), 2))
 
+    # 몸체에 STEP PRODUCT 이름을 붙인다. 강체 서명으로 몸체를 묶고, 정점 수 순으로 정렬한
+    # PRODUCT 목록과 묶음을 차례로 맞대어 등장 횟수가 같을 때만 이름을 준다.
+    # 사본이 여러 개면 무게 중심 순으로 '#1', '#2', …를 붙인다. STEP 파싱에 실패하면 모두 None.
     def _product_names_for_bodies(self, bodies):
         from OCC.Core.BRepGProp import brepgprop
         from OCC.Core.GProp import GProp_GProps
@@ -493,6 +552,7 @@ class STEPLoader:
         if not parts:
             return [None] * len(bodies)
 
+        # 강체 서명이 같은 몸체끼리 묶는다.
         groups = dict()
         for index, entry in enumerate(bodies):
             groups.setdefault(self._rigid_signature(entry[0]), list()).append(index)
@@ -500,6 +560,7 @@ class STEPLoader:
         sorted_parts = sorted(parts, key=lambda part: (part["vertices"], part["name"]))
         sorted_groups = sorted(groups.items(), key=lambda item: (item[0][0], -len(item[1])))
 
+        # 몸체의 무게 중심(사본 번호를 매기는 순서)
         def centre_of(index):
             properties = GProp_GProps()
             brepgprop.VolumeProperties(bodies[index][0], properties)
@@ -521,6 +582,8 @@ class STEPLoader:
             position += 1
         return assigned
 
+    # STEP을 읽어 (몸체, 솔리드 여부, 이름) 목록을 만든다.
+    # 이름 우선순위: STEP PRODUCT 이름 → OCC 이름표(형상 서명으로 매칭) → None
     def bodies(self):
         shape = Compound.load_from_step(self.filename).topods_shape()
         self.name_sources = list()
@@ -539,6 +602,8 @@ class STEPLoader:
                 signature = self._shape_signature(body)
                 candidates = names_by_signature.get(signature)
                 if candidates:
+                    # 같은 서명의 이름 후보는 나온 순서대로 하나씩 쓰고,
+                    # 다 쓰면 마지막 이름을 다시 쓴다.
                     consumed = assigned.get(signature, 0)
                     if consumed < len(candidates):
                         name = candidates[consumed]
@@ -548,6 +613,7 @@ class STEPLoader:
                     source = "occ"
             named_bodies.append((body, is_solid, name, source))
 
+        # 같은 이름이 여러 번 나오면 '#번호'를 붙여 구분한다.
         occurrence_count = dict()
         for _, _, name, _ in named_bodies:
             if name is not None:
@@ -562,6 +628,8 @@ class STEPLoader:
             self.name_sources.append(source)
         return distinguished
 
+    # 모든 몸체를 스레드 풀로 메쉬로 바꾼다. metadata에 솔리드 여부, 이름, 이름 출처를 담고,
+    # 이름이 없으면 메쉬 서명을 이름으로 쓴다. 결과 목록은 변환이 끝난 순서대로 쌓인다.
     def load_all(self):
         trimeshes = list()
         collected = self.bodies()
@@ -574,6 +642,7 @@ class STEPLoader:
             for future in as_completed(futures):
                 mesh = future.result()
                 is_solid, name, source = futures[future]
+                # 삼각분할 결과가 비면 이유를 남기고 건너뛴다.
                 if mesh is None:
                     self.skipped_bodies.append(
                         (name if name is not None else "이름 없음",
@@ -588,6 +657,7 @@ class STEPLoader:
                 )
                 trimeshes.append(mesh)
 
+        # 같은 이름이 여러 개면 '#번호'를 붙인다.
         counts = dict()
         for mesh in trimeshes:
             label = mesh.metadata["name"]
