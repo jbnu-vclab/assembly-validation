@@ -1,3 +1,4 @@
+# 탐색 결과를 msgpack 파일로 저장하고 읽는다. 저장 구조는 README.md의 Output Structure와 같다.
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple, Optional
 
@@ -10,31 +11,43 @@ from core.interference import OverlapRegion
 from core.state import State
 
 
+# 저장할 데이터가 맞지 않을 때 발생시키는 예외
 class TrajectorySerializationException(Exception):
     pass
 
 
+# 궤적 한 스텝: (부품 번호, 동작 후 상태, 동작)
 TrajectoryStep = Tuple[int, State, Action]
 
 
+# 진단 자세: 상태와 그 자세에서의 겹침 영역들
 @dataclass(frozen=True)
 class DiagnosedPose:
     state: State
     overlap_regions: Tuple[OverlapRegion, ...]
 
 
+# 분해하지 못한 부품의 진단 정보
 @dataclass(frozen=True)
 class SolidFailureDiagnosis:
+    # 실패 이유 문장
     reason: str
+    # 도달한 분리량과 필요한 분리량(목표 여유)
     separation: float
     required_separation: float
+    # 진단 때 장애물로 둔 부품 번호들
     obstacle_solid_ids: Tuple[int, ...]
+    # 가장 가까이 간 경로(저장용 궤적 스텝)
     closest_path_steps: Tuple[TrajectoryStep, ...]
+    # 간섭 없는 마지막 자세(없으면 None)
     last_valid_pose: Optional[DiagnosedPose]
+    # 더 밀었을 때 처음 막힌 자세와 겹침(없으면 None)
     first_blocked_pose: Optional[DiagnosedPose]
 
 
+# 부품 메쉬, 조립 상태, 분해 궤적, 실패 진단을 사전 하나로 묶어 msgpack으로 직렬화한다.
 class MsgpackTrajectorySerializer:
+    # 입력을 검사·복사하고, 조립 상태의 전체 경계 상자를 미리 계산한다.
     def __init__(
         self,
         step_path: str,
@@ -67,6 +80,7 @@ class MsgpackTrajectorySerializer:
             solid_meshes, assembled_states
         )
 
+    # 모든 부품을 각 상태로 놓았을 때의 전체 경계 상자 {'min': [...], 'max': [...]}
     @staticmethod
     def compute_global_bounding_box(
         solid_meshes: Dict[int, trimesh.Trimesh],
@@ -94,6 +108,7 @@ class MsgpackTrajectorySerializer:
             "max": [float(value) for value in global_upper],
         }
 
+    # State → {'position': [...], 'rotation': [...]}
     @staticmethod
     def _to_state_dictionary(state: State) -> Dict[str, List]:
         return {
@@ -101,6 +116,7 @@ class MsgpackTrajectorySerializer:
             "rotation": [int(angle) for angle in state.rotation],
         }
 
+    # Action → {'type': 'translation' 또는 'rotation', 'value': [...]}
     @staticmethod
     def _to_action_dictionary(action: Action) -> Dict[str, object]:
         if action.is_translation():
@@ -109,6 +125,7 @@ class MsgpackTrajectorySerializer:
             value = [int(component) for component in action.value]
         return {"type": action.action_type.value, "value": value}
 
+    # 메쉬 → {'vertices': [[x, y, z], ...], 'faces': [[a, b, c], ...]}
     @staticmethod
     def _to_mesh_dictionary(mesh: trimesh.Trimesh) -> Dict[str, List]:
         return {
@@ -116,6 +133,7 @@ class MsgpackTrajectorySerializer:
             "faces": np.asarray(mesh.faces, dtype=int).tolist(),
         }
 
+    # 겹침 영역 → {'obstacle', 'is_over_limit', 'mesh'}
     def _to_overlap_dictionary(self, overlap_region: OverlapRegion) -> Dict[str, object]:
         return {
             "obstacle": int(overlap_region.obstacle_solid_id),
@@ -126,6 +144,7 @@ class MsgpackTrajectorySerializer:
             },
         }
 
+    # 진단 자세 → {'state'}. does_include_overlaps이면 'overlaps'도 넣는다.
     def _to_pose_dictionary(
         self, diagnosed_pose: DiagnosedPose, does_include_overlaps: bool
     ) -> Dict[str, object]:
@@ -139,6 +158,8 @@ class MsgpackTrajectorySerializer:
             }
         return pose_dictionary
 
+    # 실패 진단 → {'closest_path', 'last_valid_pose', 'first_blocked_pose'}.
+    # 마지막 유효 자세는 상태만, 처음 막힌 자세는 겹침까지 담는다.
     def _to_failure_dictionary(
         self, diagnosis: SolidFailureDiagnosis
     ) -> Dict[str, object]:
@@ -169,9 +190,11 @@ class MsgpackTrajectorySerializer:
         )
         return entry
 
+    # 저장할 전체 사전 {'metadata', 'solids', 'trajectories', 'failures'}를 만든다.
     def to_output_dictionary(
         self, trajectory_steps: Sequence[TrajectoryStep]
     ) -> Dict[str, object]:
+        # 부품마다 이름, 메쉬 변환 결과, 메쉬, 조립 상태
         solids_output: Dict[int, object] = dict()
         for solid_id, mesh in self.solid_meshes.items():
             entry: Dict[str, object] = dict()
@@ -183,6 +206,7 @@ class MsgpackTrajectorySerializer:
             entry["state"] = self._to_state_dictionary(self.assembled_states[solid_id])
             solids_output[solid_id] = entry
 
+        # 분해 궤적 스텝(번호 순서 = 분해 순서)
         trajectories_output: Dict[int, object] = dict()
         for step_index, (solid_id, state, action) in enumerate(trajectory_steps):
             if solid_id not in self.solid_meshes:
@@ -199,10 +223,12 @@ class MsgpackTrajectorySerializer:
             "step_path": self.step_path,
             "global_bbox": self.global_bounding_box,
         }
+        # 추가 metadata는 기본 키(step_path, global_bbox)를 덮어쓰지 않는다.
         for key, value in self.extra_metadata.items():
             if key not in metadata_output:
                 metadata_output[key] = value
 
+        # 분해하지 못한 부품의 진단
         failures_output: Dict[int, object] = {
             int(solid_id): self._to_failure_dictionary(diagnosis)
             for solid_id, diagnosis in self.solid_failures.items()
@@ -215,12 +241,14 @@ class MsgpackTrajectorySerializer:
             "failures": failures_output,
         }
 
+    # 전체 사전을 msgpack 바이트로 바꾼다.
     def serialize_to_binary(
         self, trajectory_steps: Sequence[TrajectoryStep]
     ) -> bytes:
         output_dictionary = self.to_output_dictionary(trajectory_steps)
         return msgpack.packb(output_dictionary, use_bin_type=True)
 
+    # msgpack 바이트를 파일로 쓴다.
     def write_to_file(
         self, trajectory_steps: Sequence[TrajectoryStep], output_path: str
     ) -> None:
@@ -228,10 +256,12 @@ class MsgpackTrajectorySerializer:
         with open(output_path, "wb") as output_file:
             output_file.write(binary_data)
 
+    # msgpack 바이트를 사전으로 읽는다(정수 키 허용).
     @staticmethod
     def deserialize_from_binary(binary_data: bytes) -> Dict[str, object]:
         return msgpack.unpackb(binary_data, raw=False, strict_map_key=False)
 
+    # msgpack 파일을 읽어 사전으로 돌려준다.
     @staticmethod
     def read_from_file(input_path: str) -> Dict[str, object]:
         with open(input_path, "rb") as input_file:
