@@ -7,6 +7,7 @@ dependencies:
   - python=3.12
   # OpenCASCADE: STEP 읽기와 B-rep 삼각분할
   - pythonocc-core=7.9.3
+  - nodejs=22
   - pip:
     # 배열 계산
     - numpy
@@ -22,5 +23,7 @@ dependencies:
     - msgpack
     # 설정 파일과 명령행 인자 처리
     - hydra-core
-    # occwl: STEP을 OCC 형상으로 읽기(Compound.load_from_step)
+    - fastapi
+    - "uvicorn[standard]"
+    - python-multipart
     - git+https://github.com/AutodeskAILab/occwl.git
